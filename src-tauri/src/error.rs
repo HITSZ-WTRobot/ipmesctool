@@ -14,4 +14,6 @@ pub enum MotorError {
     Timeout,
     #[error("emit event error: {0}")]
     TauriEmitError(tauri::Error),
+    #[error("disconnected")]
+    Disconnected,
 }

@@ -1,4 +1,6 @@
-#[derive(Debug)]
+use strum_macros::{Display, EnumString};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display)]
 pub enum MotorState {
     Stop,
     DebugRun,

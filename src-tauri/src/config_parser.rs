@@ -1,4 +1,5 @@
 use scan_fmt::scan_fmt;
+use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumString};
 
 #[derive(Debug, Default)]
@@ -190,45 +191,45 @@ impl ConfigParser {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionPIDConfig {
     pub kp: f32,
     pub ki: f32,
     pub kd: f32,
     pub output_max: f32,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeedPIConfig {
     pub kp: f32,
     pub ki: f32,
     pub output_max: f32,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentPIConfig {
     pub kp: f32,
     pub ki: f32,
 }
 
 #[repr(i8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EncoderDirection {
     Same = 1i8,
     Reverse = -1i8,
 }
-#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display, Serialize, Deserialize)]
 pub enum EncoderType {
     #[strum(serialize = "MT6701")]
     MT6701,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncoderConfig {
     pub pole_pairs: u32,
     pub encoder_direction: EncoderDirection,
     pub encoder_offset: f32,
     pub encoder_type: EncoderType,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MotorConfig {
     pub id: u8,
     pub udc: f32,

@@ -5,10 +5,13 @@ use crate::serial::SerialDevice;
 use log::{error, warn};
 use scan_fmt::scan_fmt;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+pub use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
 // const MAX_HISTORY: usize = 100000;
@@ -17,20 +20,21 @@ use tokio::time::{timeout, Duration};
 pub struct Timestamped<T> {
     pub timestamp: u64, // 毫秒
     pub value: T,
+    pub r#type: String,
 }
 
 impl<T> Timestamped<T> {
-    pub fn new(value: T) -> Self {
+    pub fn new(value: T, r#type: String) -> Self {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        Self { timestamp: ts, value }
+        Self { timestamp: ts, value, r#type }
     }
 }
 
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MotorFeedbackState {
     None,
     Speed,
@@ -47,14 +51,17 @@ pub struct Motor {
     pub motor_config: Mutex<Option<MotorConfig>>,
     pub app: AppHandle,
 
+    parser_feedback_handle: Mutex<Option<JoinHandle<()>>>,
+    parser_feedback_running: AtomicBool,
+
     // pub speed_history: Mutex<VecDeque<Timestamped<f32>>>,
     // pub position_history: Mutex<VecDeque<Timestamped<f32>>>,
     // pub current_history: Mutex<VecDeque<Timestamped<(f32, f32, f32)>>>,
     // pub udc_history: Mutex<VecDeque<Timestamped<f32>>>,
 }
 impl Motor {
-    pub fn new(serial: Arc<SerialDevice>, app: AppHandle) -> Self {
-        Self {
+    pub fn new(serial: Arc<SerialDevice>, app: AppHandle) -> Arc<Self> {
+        Arc::new(Self {
             serial,
             state: Mutex::new(MotorState::Stop),
             feedback: Mutex::new(MotorFeedbackState::None),
@@ -64,14 +71,16 @@ impl Motor {
             // position_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
             // current_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
             // udc_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
-        }
+            parser_feedback_handle: Default::default(),
+            parser_feedback_running: AtomicBool::new(false),
+        })
     }
 
-    async fn send_command(&self, cmd: String) -> Result<(), MotorError> {
+    async fn send_command(self: &Arc<Self>, cmd: String) -> Result<(), MotorError> {
         self.serial.send(cmd.as_str()).await.map_err(|e| MotorError::SerialError(e))
     }
 
-    pub async fn set_feedback(&self, new_feedback: MotorFeedbackState) -> Result<(), MotorError> {
+    pub async fn set_feedback(self: &Arc<Self>, new_feedback: MotorFeedbackState) -> Result<(), MotorError> {
         let mut feedback = self.feedback.lock().await;
         if *feedback == new_feedback {
             return Ok(());
@@ -92,7 +101,7 @@ impl Motor {
         }
     }
 
-    pub async fn get_config(&self) -> Result<MotorConfig, MotorError> {
+    pub async fn get_config(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
         let mut feedback = self.feedback.lock().await;
         let cmd = MotorFeedbackCommand::GetConfig.to_string();
         self.send_command(cmd).await?;
@@ -125,7 +134,7 @@ impl Motor {
         }
     }
 
-    pub async fn send_running_command(&self, run_cmd: &MotorRunCommand) -> Result<(), MotorError> {
+    pub async fn send_running_command(self: &Arc<Self>, run_cmd: &MotorRunCommand) -> Result<(), MotorError> {
         let mut state = self.state.lock().await;
         if let Some(line) = run_cmd.to_string(&state) {
             self.send_command(line).await
@@ -139,7 +148,7 @@ impl Motor {
         Ok(())
     }
 
-    pub async fn send_config_command(&self, config_cmd: &MotorConfigCommand) -> Result<(), MotorError> {
+    pub async fn send_config_command(self: &Arc<Self>, config_cmd: &MotorConfigCommand) -> Result<(), MotorError> {
         let state = self.state.lock().await;
         if let Some(line) = config_cmd.to_string(&state) {
             self.send_command(line).await
@@ -148,7 +157,7 @@ impl Motor {
         }
     }
 
-    pub async fn calibration(&self) -> Result<(), MotorError> {
+    pub async fn calibration(self: &Arc<Self>) -> Result<(), MotorError> {
         let mut state = self.state.lock().await;
         if let Some(line) = MotorCalibrationCommand::Calibration.to_string(&state) {
             self.send_command(line).await?;
@@ -185,33 +194,52 @@ impl Motor {
     //     if hist.len() > MAX_HISTORY { hist.pop_front(); }
     // }
 
-    async fn parse_feedback_loop(&self) -> Result<(), MotorError> {
+    pub async fn start_parse_feedback_loop(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        self.parser_feedback_running.store(true, Ordering::Relaxed);
+        *self.parser_feedback_handle.lock().await = Some(tokio::spawn(async move {
+            let _ = this.parse_feedback_loop().await;
+        }));
+    }
+
+    pub async fn stop_parse_feedback_loop(self: &Arc<Self>) {
+        self.parser_feedback_running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.parser_feedback_handle.lock().await.take() {
+            let _ = handle.await;
+        }
+    }
+
+    async fn parse_feedback_loop(self: Arc<Self>) {
         let mut rx = self.serial.recv_event_tx.subscribe();
 
         // 循环解析串口消息
         loop {
+            if !self.parser_feedback_running.load(Relaxed) {
+                return;
+            }
+            // 等待单条串口消息
+            let line_result = rx.recv().await;
+
             let current_feedback = {
                 let fb = self.feedback.lock().await;
                 *fb
             };
-            // 如果没有反馈数据，就简单等待然后退出
-            if current_feedback == MotorFeedbackState::None {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            // 等待单条串口消息
-            let line_result = timeout(Duration::from_secs(3), rx.recv()).await;
 
             match line_result {
-                Ok(Ok(line)) => {
+                Ok(line) => {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
                     }
+                    if line == "__DISCONNECTED__".to_string() {
+                        // 串口被关闭
+                        self.app.emit("motor-disconnected", ()).unwrap();
+                        break;
+                    }
                     match current_feedback {
                         MotorFeedbackState::Speed => {
                             if let Ok(speed) = scan_fmt!(line, "speed: {}", f32) {
-                                if let Err(e) = self.app.emit("push_speed", Timestamped::new(speed)) {
+                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(speed, "speed".to_string())) {
                                     error!("Tauri emit error {e}");
                                 }
                             } else {
@@ -221,7 +249,7 @@ impl Motor {
                         }
                         MotorFeedbackState::Position => {
                             if let Ok(position) = scan_fmt!(line, "position: {}", f32) {
-                                if let Err(e) = self.app.emit("push_position", Timestamped::new(position)) {
+                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(position, "position".to_string())) {
                                     error!("Tauri emit error {e}");
                                 }
                             } else {
@@ -231,7 +259,7 @@ impl Motor {
                         }
                         MotorFeedbackState::Current => {
                             if let Ok((ia, ib, ic)) = scan_fmt!(line, "iabc:{},{},{}", f32, f32, f32) {
-                                if let Err(e) = self.app.emit("push_current", Timestamped::new((ia, ib, ic))) {
+                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new((ia, ib, ic), "iabc".to_string())) {
                                     error!("Tauri emit error {e}");
                                 }
                             } else {
@@ -241,7 +269,7 @@ impl Motor {
                         }
                         MotorFeedbackState::Udc => {
                             if let Ok(udc) = scan_fmt!(line, "udc: {}", f32) {
-                                if let Err(e) = self.app.emit("push_udc", Timestamped::new(udc)) {
+                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(udc, "udc".to_string())) {
                                     error!("Tauri emit error {e}");
                                 }
                             } else {
@@ -249,19 +277,17 @@ impl Motor {
                                 continue;
                             }
                         }
-                        MotorFeedbackState::None => {}
+                        MotorFeedbackState::None => { continue; }
                     }
                 }
-                Ok(Err(_)) => {
-                    // recv 错误，通常是广播关闭
-                    return Err(MotorError::SerialError("broadcast closed.".to_string()));
-                }
                 Err(_) => {
-                    // 超时
-                    // 可以选择忽略继续循环，或者返回错误
-                    continue;
+                    // recv 错误，通常是广播关闭
+                    break;
                 }
             }
         }
+
+        self.parser_feedback_running.store(false, Ordering::Relaxed);
+        *self.parser_feedback_handle.lock().await = None;
     }
 }
