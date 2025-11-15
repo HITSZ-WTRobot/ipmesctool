@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    console_subscriber::init();
     ipmesctool_lib::run()
 }
