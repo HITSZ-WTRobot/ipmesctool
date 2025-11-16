@@ -101,15 +101,19 @@ impl Motor {
         }
     }
 
-    pub async fn get_config(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
+    /// 从下位机加载 config 并返回
+    pub async fn load_config(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
         let mut feedback = self.feedback.lock().await;
         let cmd = MotorFeedbackCommand::GetConfig.to_string();
         self.send_command(cmd).await?;
+        *feedback = MotorFeedbackState::None;
+        // 发送之后立即释放 feedback
+        drop(feedback);
         let mut rx = self.serial.recv_event_tx.subscribe();
         // 待解析的数据
         let mut config_parser = ConfigParser::default();
         let mut section = String::new();
-        let duration = Duration::from_secs(3);
+        let duration = Duration::from_secs(5);
         let result = timeout(duration, async {
             while let Ok(line) = rx.recv().await {
                 config_parser.parse_line(&line, &mut section);
@@ -124,7 +128,6 @@ impl Motor {
                 match config_parser.try_into_motor_config() {
                     Ok(motor_config) => {
                         let mut config = self.motor_config.lock().await;
-                        *feedback = MotorFeedbackState::None;
                         *config = Some(motor_config.clone());
                         Ok(motor_config)
                     }
