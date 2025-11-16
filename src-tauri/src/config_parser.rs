@@ -47,9 +47,10 @@ pub struct ConfigParser {
 impl ConfigParser {
     /// 解析一行并更新自己
     pub fn parse_line(&mut self, line: &str, section: &mut String) {
-        let line = line.trim();
+        let line_string = line.trim().replace(": ", ":");
+        let line = line_string.as_str();
 
-        // 判断 section 切换
+        // 判断 section 切换和顶层字段
         match line {
             "position_pid:" => {
                 *section = "position_pid".to_string();
@@ -67,39 +68,46 @@ impl ConfigParser {
                 *section = "encoder".to_string();
                 return;
             }
-            _ => {}
+            _ => {
+                if let Ok(v) = scan_fmt!(line, "id:{}", u8) {
+                    self.id = Some(v);
+                    return;
+                }
+                if let Ok(v) = scan_fmt!(line, "udc:{}", f32) {
+                    self.udc = Some(v);
+                    return;
+                }
+                if let Ok(v) = scan_fmt!(line, "idq_filter_fc:{}", f32) {
+                    self.idq_filter_fc = Some(v);
+                    return;
+                }
+            }
         }
 
         // 按 section 解析
         match section.as_str() {
             "position_pid" => {
-                if let Ok(kp) = scan_fmt!(line, "Kp: {}", f32) { self.position_pid.kp = Some(kp); }
-                if let Ok(ki) = scan_fmt!(line, "Ki: {}", f32) { self.position_pid.ki = Some(ki); }
-                if let Ok(kd) = scan_fmt!(line, "Kd: {}", f32) { self.position_pid.kd = Some(kd); }
-                if let Ok(max) = scan_fmt!(line, "maxoutput: {}", f32) { self.position_pid.maxoutput = Some(max); }
+                if let Ok(kp) = scan_fmt!(line, "Kp:{}", f32) { self.position_pid.kp = Some(kp); }
+                if let Ok(ki) = scan_fmt!(line, "Ki:{}", f32) { self.position_pid.ki = Some(ki); }
+                if let Ok(kd) = scan_fmt!(line, "Kd:{}", f32) { self.position_pid.kd = Some(kd); }
+                if let Ok(max) = scan_fmt!(line, "maxoutput:{}", f32) { self.position_pid.maxoutput = Some(max); }
             }
             "speed_pi" => {
-                if let Ok(kp) = scan_fmt!(line, "Kp: {}", f32) { self.speed_pi.kp = Some(kp); }
-                if let Ok(ki) = scan_fmt!(line, "Ki: {}", f32) { self.speed_pi.ki = Some(ki); }
-                if let Ok(max) = scan_fmt!(line, "maxoutput: {}", f32) { self.speed_pi.maxoutput = Some(max); }
+                if let Ok(kp) = scan_fmt!(line, "Kp:{}", f32) { self.speed_pi.kp = Some(kp); }
+                if let Ok(ki) = scan_fmt!(line, "Ki:{}", f32) { self.speed_pi.ki = Some(ki); }
+                if let Ok(max) = scan_fmt!(line, "maxoutput:{}", f32) { self.speed_pi.maxoutput = Some(max); }
             }
             "i_pi" => {
-                if let Ok(v) = scan_fmt!(line, "id_Kp: {}", f32) { self.i_pi.id_kp = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "id_Ki: {}", f32) { self.i_pi.id_ki = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "iq_Kp: {}", f32) { self.i_pi.iq_kp = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "iq_Ki: {}", f32) { self.i_pi.iq_ki = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "id_Kp:{}", f32) { self.i_pi.id_kp = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "id_Ki:{}", f32) { self.i_pi.id_ki = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "iq_Kp:{}", f32) { self.i_pi.iq_kp = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "iq_Ki:{}", f32) { self.i_pi.iq_ki = Some(v); }
             }
             "encoder" => {
-                if let Ok(v) = scan_fmt!(line, "pole_pairs: {}", u32) { self.encoder.pole_pairs = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_direct: {}", i32) { self.encoder.encoder_direct = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_offset: {}", f32) { self.encoder.encoder_offset = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_type: {}", String) { self.encoder.encoder_type = Some(v); }
-            }
-            "" => {
-                // 顶层字段
-                if let Ok(v) = scan_fmt!(line, "id: {}", u8) { self.id = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "udc: {}", f32) { self.udc = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "idq_filter_fc: {}", f32) { self.idq_filter_fc = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "pole_pairs:{}", u32) { self.encoder.pole_pairs = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "encoder_direct:{}", i32) { self.encoder.encoder_direct = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "encoder_offset:{}", f32) { self.encoder.encoder_offset = Some(v); }
+                if let Ok(v) = scan_fmt!(line, "encoder_type:{}", String) { self.encoder.encoder_type = Some(v); }
             }
             _ => {}
         }
