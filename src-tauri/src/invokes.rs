@@ -1,3 +1,4 @@
+use crate::config_parser::MotorConfig;
 use crate::motor::{Motor, MotorFeedbackState};
 use crate::serial::SerialDevice;
 use std::sync::Arc;
@@ -63,6 +64,16 @@ pub async fn set_motor_feedback(state: tauri::State<'_, AppState>, feedback: Mot
     let motor_guard = state.motor.lock().await;
     if let Some(motor) = motor_guard.as_ref() {
         motor.set_feedback(feedback).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_motor_config(state: tauri::State<'_, AppState>) -> Result<MotorConfig, String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.get_config().await.map_err(|e| e.to_string())
     } else {
         Err("Motor is not connected".to_string())
     }
