@@ -77,6 +77,7 @@ impl Motor {
     }
 
     async fn send_command(self: &Arc<Self>, cmd: String) -> Result<(), MotorError> {
+        self.app.emit("serial-sent", &cmd).unwrap();
         self.serial.send(cmd.as_str()).await.map_err(|e| MotorError::SerialError(e))
     }
 
@@ -144,10 +145,13 @@ impl Motor {
         } else {
             Err(MotorError::InvalidState("cannot send command in current state".into()))
         }?;
+        // 更新电机状态
         match run_cmd {
             MotorRunCommand::Stop => *state = MotorState::Stop,
             _ => *state = MotorState::DebugRun,
         }
+        // 向前端同步电机状态
+        self.app.emit("motor-state-change", *state).unwrap();
         Ok(())
     }
 
@@ -165,6 +169,8 @@ impl Motor {
         if let Some(line) = MotorCalibrationCommand::Calibration.to_string(&state) {
             self.send_command(line).await?;
             *state = MotorState::Test;
+            // 向前端同步状态
+            self.app.emit("motor-state-change", MotorState::Test).unwrap();
             drop(state);
             // TODO: 等待校准完成
             Ok(())
@@ -239,6 +245,7 @@ impl Motor {
                         self.app.emit("motor-disconnected", ()).unwrap();
                         break;
                     }
+                    self.app.emit("serial-received", line).unwrap();
                     match current_feedback {
                         MotorFeedbackState::Speed => {
                             if let Ok(speed) = scan_fmt!(line, "speed: {}", f32) {
