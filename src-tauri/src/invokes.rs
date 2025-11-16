@@ -49,6 +49,14 @@ pub async fn disconnect_motor(state: tauri::State<'_, AppState>) -> Result<(), S
 }
 
 #[tauri::command]
+pub async fn get_motor_port(state: tauri::State<'_, AppState>) -> Result<String, ()> {
+    match state.motor.lock().await.as_ref() {
+        Some(motor) => Ok(motor.serial.port_name.clone()),
+        None => Err(()),
+    }
+}
+
+#[tauri::command]
 pub async fn get_motor_state(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let motor_guard = state.motor.lock().await;
     if let Some(motor) = motor_guard.as_ref() {
@@ -73,7 +81,25 @@ pub async fn set_motor_feedback(state: tauri::State<'_, AppState>, feedback: Mot
 pub async fn get_motor_config(state: tauri::State<'_, AppState>) -> Result<MotorConfig, String> {
     let motor_guard = state.motor.lock().await;
     if let Some(motor) = motor_guard.as_ref() {
-        motor.get_config().await.map_err(|e| e.to_string())
+        let config = motor.motor_config.lock().await;
+        if let Some(config) = (*config).as_ref() {
+            // 如果配置已存在就直接返回
+            Ok(config.clone())
+        } else {
+            drop(config);
+            // 否则先加载再返回
+            motor.load_config().await.map_err(|e| e.to_string())
+        }
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn refresh_motor_config(state: tauri::State<'_, AppState>) -> Result<MotorConfig, String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.load_config().await.map_err(|e| e.to_string())
     } else {
         Err("Motor is not connected".to_string())
     }
