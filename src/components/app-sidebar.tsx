@@ -5,6 +5,7 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar.tsx";
 import Device from "@/components/device.tsx";
+import { MotorState } from "@/components/motor-state.tsx";
 
 export default function AppSidebar() {
   return (
@@ -12,6 +13,7 @@ export default function AppSidebar() {
       <SidebarHeader></SidebarHeader>
       <SidebarContent></SidebarContent>
       <SidebarFooter>
+        <MotorState />
         <Device />
       </SidebarFooter>
     </Sidebar>
