@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumString};
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display, Serialize, Deserialize)]
 pub enum MotorState {
     Stop,
     DebugRun,
