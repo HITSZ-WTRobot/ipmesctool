@@ -1,4 +1,4 @@
-import { atom, useAtom, useAtomValue } from "jotai";
+import { atom, useAtom } from "jotai";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -27,26 +27,13 @@ import { ButtonGroup, ButtonGroupText } from "@/components/ui/button-group.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { Key, RefreshCcw, Save } from "lucide-react";
 import { setPartValue } from "@/lib/utils.ts";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 
-const speedPIAtom = atom<SpeedPI>({
-  ki: 0,
-  kp: 0,
-  output_max: 0,
-});
-const positionPIDAtom = atom<PositionPID>({
-  kd: 0,
-  ki: 0,
-  kp: 0,
-  output_max: 0,
-});
-const currentIdPIAtom = atom<CurrentPI>({
-  ki: 0,
-  kp: 0,
-});
-const currentIqPIAtom = atom<CurrentPI>({
-  ki: 0,
-  kp: 0,
-});
+const speedPIAtom = atom<SpeedPI | null>(null);
+const positionPIDAtom = atom<PositionPID | null>(null);
+const currentIdPIAtom = atom<CurrentPI | null>(null);
+const currentIqPIAtom = atom<CurrentPI | null>(null);
 
 function SinglePIDConfig<T extends Record<string, number>>({
   name,
@@ -209,7 +196,7 @@ function MultiPIConfigWithLock<T extends Record<string, number>>({
 }
 
 export default function PidConfig() {
-  const motorConfig = useAtomValue(motorConfigAtom);
+  const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
 
   const [speedPI, setSpeedPI] = useAtom(speedPIAtom);
   const [positionPID, setPositionPID] = useAtom(positionPIDAtom);
@@ -218,14 +205,38 @@ export default function PidConfig() {
 
   useEffect(() => {
     if (motorConfig) {
-      setSpeedPI({ ...motorConfig.speed_pi });
-      setPositionPID({ ...motorConfig.position_pid });
-      setCurrentIdPI({ ...motorConfig.current_id_pi });
-      setCurrentIqPI({ ...motorConfig.current_iq_pi });
+      if (speedPI === null && motorConfig) {
+        setSpeedPI({ ...motorConfig.speed_pi });
+      }
+      if (positionPID === null && motorConfig) {
+        setPositionPID({ ...motorConfig.position_pid });
+      }
+      if (currentIdPI === null && motorConfig) {
+        setCurrentIdPI({ ...motorConfig.current_id_pi });
+      }
+      if (currentIqPI === null && motorConfig) {
+        setCurrentIqPI({ ...motorConfig.current_iq_pi });
+      }
     }
-  }, [motorConfig, setSpeedPI, setPositionPID, setCurrentIdPI, setCurrentIqPI]);
+  }, [
+    currentIdPI,
+    currentIqPI,
+    motorConfig,
+    positionPID,
+    setCurrentIdPI,
+    setCurrentIqPI,
+    setPositionPID,
+    setSpeedPI,
+    speedPI,
+  ]);
 
-  if (!motorConfig) {
+  if (
+    !motorConfig ||
+    !speedPI ||
+    !positionPID ||
+    !currentIdPI ||
+    !currentIqPI
+  ) {
     return <div>电机配置未加载</div>;
   }
 
@@ -237,7 +248,25 @@ export default function PidConfig() {
         setValue={setPositionPID}
         labels={{ kp: "Kp", ki: "Ki", kd: "Kd", output_max: "OutputMax" }}
         reload={() => setPositionPID({ ...motorConfig.position_pid })}
-        save={function (): void {}}
+        save={async () => {
+          try {
+            await invoke("config_motor_position_pid", {
+              kp: positionPID.kp,
+              ki: positionPID.ki,
+              kd: positionPID.kd,
+              outputMax: positionPID.output_max,
+            });
+            setPartValue(
+              setMotorConfig,
+              motorConfig,
+              "position_pid",
+              positionPID,
+            );
+          } catch (e) {
+            console.log(e);
+            toast.error(`保存失败, e: ${e}`);
+          }
+        }}
       />
       <SinglePIDConfig
         name="Speed PI"
@@ -245,7 +274,19 @@ export default function PidConfig() {
         setValue={setSpeedPI}
         labels={{ kp: "Kp", ki: "Ki", output_max: "OutputMax" }}
         reload={() => setSpeedPI({ ...motorConfig.speed_pi })}
-        save={function (): void {}}
+        save={async () => {
+          try {
+            await invoke("config_motor_speed_pi", {
+              kp: speedPI.kp,
+              ki: speedPI.ki,
+              outputMax: speedPI.output_max,
+            });
+            setPartValue(setMotorConfig, motorConfig, "speed_pi", speedPI);
+          } catch (e) {
+            console.log(e);
+            toast.error(`保存失败, e: ${e}`);
+          }
+        }}
       />
       <MultiPIConfigWithLock
         name="Current Iq / Id PI"
@@ -268,7 +309,31 @@ export default function PidConfig() {
           setCurrentIdPI({ ...motorConfig.current_id_pi });
           setCurrentIqPI({ ...motorConfig.current_iq_pi });
         }}
-        save={function (): void {}}
+        save={async () => {
+          try {
+            await invoke("config_motor_current_pi", {
+              idKp: currentIdPI.kp,
+              idKi: currentIdPI.ki,
+              iqKp: currentIqPI.kp,
+              iqKi: currentIqPI.ki,
+            });
+            setPartValue(
+              setMotorConfig,
+              motorConfig,
+              "current_id_pi",
+              currentIdPI,
+            );
+            setPartValue(
+              setMotorConfig,
+              motorConfig,
+              "current_iq_pi",
+              currentIqPI,
+            );
+          } catch (e) {
+            console.log(e);
+            toast.error(`保存失败, e: ${e}`);
+          }
+        }}
       />
     </div>
   );
