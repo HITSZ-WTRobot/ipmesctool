@@ -23,7 +23,7 @@ const positionPID = z.object({
   output_max: z.number().min(0),
 });
 
-type PositionPID = z.infer<typeof positionPID>;
+export type PositionPID = z.infer<typeof positionPID>;
 
 const speedPI = z.object({
   kp: z.number(),
@@ -31,14 +31,14 @@ const speedPI = z.object({
   output_max: z.number().min(0),
 });
 
-type SpeedPI = z.infer<typeof speedPI>;
+export type SpeedPI = z.infer<typeof speedPI>;
 
 const currentPI = z.object({
   kp: z.number(),
   ki: z.number(),
 });
 
-type CurrentPI = z.infer<typeof currentPI>;
+export type CurrentPI = z.infer<typeof currentPI>;
 
 enum EncoderDirection {
   Same = 1,
