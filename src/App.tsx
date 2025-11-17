@@ -2,23 +2,61 @@ import "./App.css";
 import { ThemeProvider } from "@/components/theme-provider.tsx";
 import { SidebarProvider } from "@/components/ui/sidebar.tsx";
 import AppSidebar from "@/components/app-sidebar.tsx";
-import SerialConsole from "@/components/serial-console.tsx";
 import { Toaster } from "@/components/ui/sonner";
+import React, { JSX, Suspense, useRef } from "react";
+import { pageAtom, PageID } from "@/stores/page.ts";
+import { useAtomValue } from "jotai";
+
+const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
+const PidConfig = React.lazy(() => import("@/pages/pid-config.tsx"));
+const DeviceInfo = React.lazy(() => import("@/pages/device-info.tsx"));
+
+export const LazyPages = {
+  "Debug.Serial": SerialConsole,
+  "Motor.PID": PidConfig,
+  "Basic.DeviceInfo": DeviceInfo,
+} as const;
+
+function PersistentPages({ page }: { page: PageID }) {
+  const pageInstances = useRef<Partial<Record<PageID, JSX.Element>>>({});
+
+  // 如果当前页还没有渲染过，创建一个实例
+  const PageComponent = LazyPages[page];
+  if (!pageInstances.current[page]) {
+    pageInstances.current[page] = (
+      <Suspense fallback={<div>Loading...</div>}>
+        <PageComponent />
+      </Suspense>
+    );
+  }
+
+  return (
+    <div className="relative w-full h-full">
+      {Object.entries(pageInstances.current).map(([id, element]) => (
+        <div
+          key={id}
+          style={{ display: id === page ? "block" : "none" }}
+          className="w-full h-full"
+        >
+          {element}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function App() {
+  const page = useAtomValue(pageAtom);
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
-      <SidebarProvider>
+      <SidebarProvider className="h-screen w-screen">
         <AppSidebar />
-        <main className="h-screen w-screen flex flex-col items-center justify-center">
-          <div className="w-full flex flex-row flex-1">
-            <SerialConsole />
-          </div>
-          <div className="flex flex-row w-full">
-            <div></div>
-            <div className="flex-1"></div>
-          </div>
-        </main>
+        <div className="w-full h-screen flex flex-col items-center">
+          <main className="w-full flex-1 overflow-y-scroll">
+            <PersistentPages page={page} />
+          </main>
+          <footer className="flex flex-row w-full h-24 bg-accent"></footer>
+        </div>
         <Toaster />
       </SidebarProvider>
     </ThemeProvider>
