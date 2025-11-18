@@ -15,6 +15,7 @@ import { MotorState } from "@/components/motor-state.tsx";
 import { useAtom } from "jotai";
 import { pageAtom, PageGroups } from "@/stores/page";
 import { useMemo } from "react";
+import RefreshConfigButton from "@/components/refresh-config-button.tsx";
 
 export default function AppSidebar() {
   const [page, setPage] = useAtom(pageAtom);
@@ -44,6 +45,7 @@ export default function AppSidebar() {
           ))}
         </SidebarContent>
         <SidebarFooter>
+          <RefreshConfigButton />
           <MotorState />
           <Device />
         </SidebarFooter>
