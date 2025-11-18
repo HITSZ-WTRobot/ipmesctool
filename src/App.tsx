@@ -7,6 +7,7 @@ import React, { JSX, Suspense, useRef } from "react";
 import { pageAtom, PageID } from "@/stores/page.ts";
 import { useAtomValue } from "jotai";
 import { useSerialDebug } from "@/stores/serial.ts";
+import { AngleDisplaySwitcher } from "@/components/angle.tsx";
 
 const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
 const PidConfig = React.lazy(() => import("@/pages/pid-config.tsx"));
@@ -57,7 +58,9 @@ function App() {
           <main className="w-full flex-1 overflow-y-scroll">
             <PersistentPages page={page} />
           </main>
-          <footer className="flex flex-row w-full h-24 bg-accent"></footer>
+          <footer className="flex flex-row w-full h-24 bg-accent">
+            <AngleDisplaySwitcher />
+          </footer>
         </div>
         <Toaster />
       </SidebarProvider>

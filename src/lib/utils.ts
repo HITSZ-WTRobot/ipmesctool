@@ -13,3 +13,11 @@ export function setPartValue<T>(
 ) {
   setter({ ...prev, [key]: value });
 }
+
+export function rad2deg(radians: number) {
+  return (radians * 180) / Math.PI;
+}
+
+export function deg2rad(degrees: number) {
+  return (degrees * Math.PI) / 180;
+}
