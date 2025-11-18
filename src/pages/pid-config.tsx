@@ -75,6 +75,7 @@ function SinglePIDConfig<T extends Record<string, number>>({
               <Input
                 id={`${name}.${k}`}
                 type="number"
+                min={0}
                 value={v}
                 onChange={(e) =>
                   setPartValue<T>(

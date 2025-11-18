@@ -17,47 +17,47 @@ type MotorState = z.infer<typeof motorState>;
 type MotorFeedbackType = z.infer<typeof motorFeedbackType>;
 
 const positionPID = z.object({
-  kp: z.number(),
-  ki: z.number(),
-  kd: z.number(),
+  kp: z.number().min(0),
+  ki: z.number().min(0),
+  kd: z.number().min(0),
   output_max: z.number().min(0),
 });
 
 export type PositionPID = z.infer<typeof positionPID>;
 
 const speedPI = z.object({
-  kp: z.number(),
-  ki: z.number(),
+  kp: z.number().min(0),
+  ki: z.number().min(0),
   output_max: z.number().min(0),
 });
 
 export type SpeedPI = z.infer<typeof speedPI>;
 
 const currentPI = z.object({
-  kp: z.number(),
-  ki: z.number(),
+  kp: z.number().min(0),
+  ki: z.number().min(0),
 });
 
 export type CurrentPI = z.infer<typeof currentPI>;
-
-enum EncoderDirection {
-  Same = 1,
-  Reverse = -1,
-}
 
 export enum EncoderType {
   MT6701 = "MT6701",
 }
 
-const encoderDirection = z.enum(EncoderDirection);
+const encoderDirection = z.enum(["Same", "Reverse"]);
+
+export type EncoderDirection = z.infer<typeof encoderDirection>;
+
 const encoderType = z.enum(EncoderType);
 
 const encoderConfig = z.object({
-  pole_pairs: z.uint32(),
+  pole_pairs: z.uint32().min(1),
   encoder_direction: encoderDirection,
   encoder_offset: z.number(),
   encoder_type: encoderType,
 });
+
+export type EncoderConfig = z.infer<typeof encoderConfig>;
 
 const motorConfig = z.object({
   id: z.int().min(0).max(255),
