@@ -1,7 +1,8 @@
 use crate::command::MotorConfigCommand;
-use crate::config_parser::MotorConfig;
+use crate::config_parser::{EncoderDirection, EncoderType, MotorConfig};
 use crate::motor::{Motor, MotorFeedbackState};
 use crate::serial::SerialDevice;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
@@ -148,6 +149,48 @@ pub async fn config_motor_encoder(pole_pairs: u32, encoder_direction: EncoderDir
     if let Some(motor) = motor_guard.as_ref() {
         motor.send_config_command(
             &MotorConfigCommand::ConfigEncoder { pole_pairs, encoder_direct: encoder_direction as i8, encoder_offset, encoder_type: encoder_type.to_string() },
+        ).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn motor_calibration(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.calibration().await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn is_motor_config_unsaved(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        Ok(motor.unsaved.load(Ordering::Relaxed))
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn save_motor_config(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.save_config().await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn config_motor_id(state: tauri::State<'_, AppState>, id: u8) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_config_command(
+            &MotorConfigCommand::ConfigId(id),
         ).await.map_err(|e| e.to_string())
     } else {
         Err("Motor is not connected".to_string())

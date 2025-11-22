@@ -1,4 +1,4 @@
-use crate::invokes::{config_motor_current_pi, config_motor_encoder, config_motor_position_pid, config_motor_speed_pi, connect_motor, disconnect_motor, get_motor_config, get_motor_port, get_motor_state, list_serial_ports, refresh_motor_config, set_motor_feedback, AppState};
+use crate::invokes::{config_motor_current_pi, config_motor_encoder, config_motor_id, config_motor_position_pid, config_motor_speed_pi, connect_motor, disconnect_motor, get_motor_config, get_motor_port, get_motor_state, is_motor_config_unsaved, list_serial_ports, motor_calibration, refresh_motor_config, save_motor_config, set_motor_feedback, AppState};
 use log::debug;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -10,6 +10,7 @@ mod error;
 mod command;
 mod config_parser;
 mod invokes;
+mod calibration_parser;
 
 pub fn start_serial_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -62,7 +63,11 @@ pub fn run() {
             config_motor_position_pid,
             config_motor_speed_pi,
             config_motor_current_pi,
-            config_motor_encoder
+            config_motor_encoder,
+            motor_calibration,
+            is_motor_config_unsaved,
+            save_motor_config,
+            config_motor_id
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
