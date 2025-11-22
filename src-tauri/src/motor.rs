@@ -50,6 +50,7 @@ pub struct Motor {
     pub feedback: Mutex<MotorFeedbackState>,
     pub motor_config: Mutex<Option<MotorConfig>>,
     pub app: AppHandle,
+    pub unsaved: AtomicBool, // 是否有未保存的配置
 
     parser_feedback_handle: Mutex<Option<JoinHandle<()>>>,
     parser_feedback_running: AtomicBool,
@@ -71,6 +72,7 @@ impl Motor {
             // position_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
             // current_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
             // udc_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
+            unsaved: AtomicBool::new(false),
             parser_feedback_handle: Default::default(),
             parser_feedback_running: AtomicBool::new(false),
         })
@@ -158,9 +160,26 @@ impl Motor {
     pub async fn send_config_command(self: &Arc<Self>, config_cmd: &MotorConfigCommand) -> Result<(), MotorError> {
         let state = self.state.lock().await;
         if let Some(line) = config_cmd.to_string(&state) {
-            self.send_command(line).await
+            self.send_command(line).await?;
+            self.unsaved.store(true, Relaxed);
+            Ok(())
         } else {
             Err(MotorError::InvalidState("cannot send command in current state".into()))
+        }
+    }
+
+    pub async fn save_config(self: &Arc<Self>) -> Result<(), MotorError> {
+        if self.unsaved.load(Relaxed) {
+            let state = self.state.lock().await;
+            if let Some(line) = MotorConfigSave.to_string(&state) {
+                self.send_command(line).await?;
+                self.unsaved.store(true, Relaxed);
+                Ok(())
+            } else {
+                Err(MotorError::InvalidState("cannot send command in current state".into()))
+            }
+        } else {
+            Ok(())
         }
     }
 

@@ -64,7 +64,6 @@ pub enum MotorConfigCommand {
     ConfigEncoder { pole_pairs: u32, encoder_direct: i8, encoder_offset: f32, encoder_type: String },
     ConfigId(u8),
     ConfigUdc(f32),
-    Save,
 }
 
 impl MotorConfigCommand {
@@ -126,13 +125,17 @@ impl MotorConfigCommand {
                     _ => None,
                 }
             }
+        }
+    }
+}
 
-            MotorConfigCommand::Save => {
-                match state {
-                    MotorState::Stop => Some("save\r\n".into()),
-                    _ => None,
-                }
-            }
+pub struct MotorConfigSave;
+
+impl MotorConfigSave {
+    pub fn to_string(&self, state: &MotorState) -> Option<String> {
+        match state {
+            MotorState::Stop => Some("save\r\n".into()),
+            _ => None,
         }
     }
 }
