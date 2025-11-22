@@ -4,6 +4,7 @@ export type PageID =
   | "Basic.DeviceInfo"
   | "Motor.PID"
   | "Motor.Encoder"
+  | "Motor.Calibration"
   | "Debug.Serial";
 
 export interface PageGroup {
@@ -38,6 +39,10 @@ export const PageGroups: PageGroup[] = [
       {
         id: "Motor.Encoder",
         name: "编码器设置",
+      },
+      {
+        id: "Motor.Calibration",
+        name: "校准",
       },
     ],
   },

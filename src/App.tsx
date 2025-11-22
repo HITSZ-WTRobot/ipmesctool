@@ -4,7 +4,7 @@ import { SidebarProvider } from "@/components/ui/sidebar.tsx";
 import AppSidebar from "@/components/app-sidebar.tsx";
 import { Toaster } from "@/components/ui/sonner";
 import React, { JSX, Suspense, useRef } from "react";
-import { pageAtom, PageID } from "@/stores/page.ts";
+import { pageAtom, PageID, windowLockedAtom } from "@/stores/page.ts";
 import { useAtomValue } from "jotai";
 import { useSerialDebug } from "@/stores/serial.ts";
 import { AngleDisplaySwitcher } from "@/components/angle.tsx";
@@ -18,6 +18,7 @@ export const LazyPages = {
   "Debug.Serial": SerialConsole,
   "Motor.PID": PidConfig,
   "Motor.Encoder": React.lazy(() => import("@/pages/encoder-config.tsx")),
+  "Motor.Calibration": React.lazy(() => import("@/pages/calibration.tsx")),
   "Basic.DeviceInfo": DeviceInfo,
 } as const;
 
@@ -56,6 +57,9 @@ function App() {
   useSerialDebug();
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
+      {locked && (
+        <div className="fixed inset-0 bg-black/0 z-[9999] pointer-events-auto" />
+      )}
       <SidebarProvider className="h-screen w-screen">
         <AppSidebar />
         <div className="w-full h-screen flex flex-col items-center">
