@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useEffect, useMemo, useState } from "react";
-import { motorConfigAtom } from "@/stores/motor";
+import { motorConfigAtom, motorConfigUnsavedAtom } from "@/stores/motor";
 import { CurrentPI, PositionPID, SpeedPI } from "@/motor";
 import { ButtonGroup, ButtonGroupText } from "@/components/ui/button-group.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -29,6 +29,7 @@ import { Key, RefreshCcw, Save } from "lucide-react";
 import { setPartValue } from "@/lib/utils.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { useSetAtom } from "jotai/index";
 
 const speedPIAtom = atom<SpeedPI | null>(null);
 const positionPIDAtom = atom<PositionPID | null>(null);
@@ -199,6 +200,7 @@ function MultiPIConfigWithLock<T extends Record<string, number>>({
 export default function PidConfig() {
   const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
 
+  const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
   const [speedPI, setSpeedPI] = useAtom(speedPIAtom);
   const [positionPID, setPositionPID] = useAtom(positionPIDAtom);
   const [currentIdPI, setCurrentIdPI] = useAtom(currentIdPIAtom);
@@ -263,6 +265,7 @@ export default function PidConfig() {
               "position_pid",
               positionPID,
             );
+            setUnsaved(true);
           } catch (e) {
             console.log(e);
             toast.error(`保存失败, e: ${e}`);
@@ -283,6 +286,7 @@ export default function PidConfig() {
               outputMax: speedPI.output_max,
             });
             setPartValue(setMotorConfig, motorConfig, "speed_pi", speedPI);
+            setUnsaved(true);
           } catch (e) {
             console.log(e);
             toast.error(`保存失败, e: ${e}`);
@@ -330,6 +334,7 @@ export default function PidConfig() {
               "current_iq_pi",
               currentIqPI,
             );
+            setUnsaved(true);
           } catch (e) {
             console.log(e);
             toast.error(`保存失败, e: ${e}`);

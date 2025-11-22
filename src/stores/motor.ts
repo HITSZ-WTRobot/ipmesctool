@@ -8,3 +8,5 @@ export type MotorState = "Stop" | "DebugRun" | "Run" | "Test" | "Fault";
 export const motorStateAtom = atom<MotorState>("Stop");
 
 export const motorConfigAtom = atom<MotorConfig>();
+
+export const motorConfigUnsavedAtom = atom<boolean>(false);

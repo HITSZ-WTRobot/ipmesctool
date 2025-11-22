@@ -12,13 +12,16 @@ import {
 } from "@/components/ui/sidebar.tsx";
 import Device from "@/components/device.tsx";
 import { MotorState } from "@/components/motor-state.tsx";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { pageAtom, PageGroups } from "@/stores/page";
 import { useMemo } from "react";
 import RefreshConfigButton from "@/components/refresh-config-button.tsx";
+import { motorConnectedAtom } from "@/stores/motor.ts";
+import SaveConfigButton from "@/components/save-config-button.tsx";
 
 export default function AppSidebar() {
   const [page, setPage] = useAtom(pageAtom);
+  const connected = useAtomValue(motorConnectedAtom);
   return useMemo(
     () => (
       <Sidebar>
@@ -45,12 +48,17 @@ export default function AppSidebar() {
           ))}
         </SidebarContent>
         <SidebarFooter>
-          <RefreshConfigButton />
+          {connected && (
+            <>
+              <SaveConfigButton />
+              <RefreshConfigButton />
+            </>
+          )}
           <MotorState />
           <Device />
         </SidebarFooter>
       </Sidebar>
     ),
-    [page, setPage],
+    [connected, page, setPage],
   );
 }

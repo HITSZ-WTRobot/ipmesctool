@@ -5,7 +5,7 @@ import {
   EncoderType,
 } from "@/motor.ts";
 import React, { useCallback, useEffect } from "react";
-import { motorConfigAtom } from "@/stores/motor.ts";
+import { motorConfigAtom, motorConfigUnsavedAtom } from "@/stores/motor.ts";
 import {
   Card,
   CardAction,
@@ -31,12 +31,14 @@ import {
 import { AngleUnit, useAngleConverter } from "@/components/angle.tsx";
 import { useDegAtom } from "@/stores/angle.ts";
 import { invoke } from "@tauri-apps/api/core";
+import { useSetAtom } from "jotai/index";
 
 const encoderConfigAtom = atom<EncoderConfigType | null>(null);
 
 export default function EncoderConfig() {
   const [encoderConfig, setEncoderConfig] = useAtom(encoderConfigAtom);
   const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
+  const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
   const useDeg = useAtomValue(useDegAtom);
 
   const refresh = useCallback(() => {
@@ -97,6 +99,7 @@ export default function EncoderConfig() {
                     encoder_direction: c.encoderDirection,
                     encoder_type: c.encoderType,
                   });
+                  setUnsaved(true);
                 } catch (e) {
                   console.log(e);
                   toast.error(`保存失败, e: ${e}`);

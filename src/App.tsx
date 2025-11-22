@@ -8,6 +8,7 @@ import { pageAtom, PageID } from "@/stores/page.ts";
 import { useAtomValue } from "jotai";
 import { useSerialDebug } from "@/stores/serial.ts";
 import { AngleDisplaySwitcher } from "@/components/angle.tsx";
+import { motorConfigUnsavedAtom } from "@/stores/motor.ts";
 
 const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
 const PidConfig = React.lazy(() => import("@/pages/pid-config.tsx"));
@@ -50,6 +51,7 @@ function PersistentPages({ page }: { page: PageID }) {
 
 function App() {
   const page = useAtomValue(pageAtom);
+  const unsaved = useAtomValue(motorConfigUnsavedAtom);
   useSerialDebug();
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
@@ -61,6 +63,7 @@ function App() {
           </main>
           <footer className="flex flex-row w-full h-24 bg-accent">
             <AngleDisplaySwitcher />
+            {unsaved && <span>*配置未写入 Flash</span>}
           </footer>
         </div>
         <Toaster />

@@ -1,6 +1,7 @@
-import { useAtom, useAtomValue } from "jotai";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
   motorConfigAtom,
+  motorConfigUnsavedAtom,
   motorConnectedAtom,
   type MotorState as MotorStateType,
   motorStateAtom,
@@ -14,11 +15,16 @@ export function MotorState() {
   const [motorState, setMotorState] = useAtom(motorStateAtom);
   const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
   const connect = useAtomValue(motorConnectedAtom);
+  const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
 
   useEffect(() => {
     invoke("get_motor_state").then((state) => {
       setMotorState(state as MotorStateType);
     });
+
+    invoke("is_motor_config_unsaved").then((unsaved) =>
+      setUnsaved(unsaved as boolean),
+    );
 
     const l = listen("motor-state-change", (event) => {
       setMotorState(event.payload as MotorStateType);
@@ -27,7 +33,7 @@ export function MotorState() {
     return () => {
       l.then((unlisten) => unlisten());
     };
-  }, [setMotorState]);
+  }, [setMotorState, setUnsaved]);
 
   console.log(motorConfig);
 
