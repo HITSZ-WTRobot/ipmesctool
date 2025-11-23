@@ -147,10 +147,20 @@ impl Motor {
         } else {
             Err(MotorError::InvalidState("cannot send command in current state".into()))
         }?;
-        // 更新电机状态
+        // 更新电机状态，Feedback 状态
         match run_cmd {
-            MotorRunCommand::Stop => *state = MotorState::Stop,
-            _ => *state = MotorState::DebugRun,
+            MotorRunCommand::Stop => {
+                *state = MotorState::Stop;
+                *self.feedback.lock().await = MotorFeedbackState::None;
+            }
+            MotorRunCommand::SetPosition(_) => {
+                *state = MotorState::DebugRun;
+                *self.feedback.lock().await = MotorFeedbackState::Position;
+            }
+            MotorRunCommand::SetSpeed(_) => {
+                *state = MotorState::DebugRun;
+                *self.feedback.lock().await = MotorFeedbackState::Speed;
+            }
         }
         // 向前端同步电机状态
         self.app.emit("motor-state-change", *state).unwrap();
@@ -173,7 +183,7 @@ impl Motor {
             let state = self.state.lock().await;
             if let Some(line) = MotorConfigSave.to_string(&state) {
                 self.send_command(line).await?;
-                self.unsaved.store(true, Relaxed);
+                self.unsaved.store(false, Relaxed);
                 Ok(())
             } else {
                 Err(MotorError::InvalidState("cannot send command in current state".into()))
