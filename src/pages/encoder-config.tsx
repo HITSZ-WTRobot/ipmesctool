@@ -28,7 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select.tsx";
-import { AngleUnit, useAngleConverter } from "@/components/angle.tsx";
+import { AngleUnit, useAngleConverter } from "@/components/unit.tsx";
 import { useDegAtom } from "@/stores/angle.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { useSetAtom } from "jotai/index";
