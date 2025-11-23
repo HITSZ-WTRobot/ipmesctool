@@ -1,4 +1,4 @@
-use crate::command::MotorConfigCommand;
+use crate::command::{MotorConfigCommand, MotorRunCommand};
 use crate::config_parser::{EncoderDirection, EncoderType, MotorConfig};
 use crate::motor::{Motor, MotorFeedbackState};
 use crate::serial::SerialDevice;
@@ -43,6 +43,8 @@ pub async fn disconnect_motor(state: tauri::State<'_, AppState>) -> Result<(), S
     let mut motor_guard = state.motor.lock().await;
     if let Some(motor) = motor_guard.take() {
         motor.serial.disconnect().await?;
+        // 等待 parse loop 停止
+        motor.stop_parse_feedback_loop().await;
         *motor_guard = None;
         Ok(())
     } else {
@@ -192,6 +194,60 @@ pub async fn config_motor_id(state: tauri::State<'_, AppState>, id: u8) -> Resul
         motor.send_config_command(
             &MotorConfigCommand::ConfigId(id),
         ).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn config_motor_udc(state: tauri::State<'_, AppState>, udc: f32) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_config_command(
+            &MotorConfigCommand::ConfigUdc(udc),
+        ).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn config_motor_idq_filter(state: tauri::State<'_, AppState>, fc: f32) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_config_command(
+            &MotorConfigCommand::ConfigIdqFilter(fc),
+        ).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn motor_stop(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_running_command(&MotorRunCommand::Stop).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn motor_set_speed(speed: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_running_command(&MotorRunCommand::SetSpeed(speed)).await.map_err(|e| e.to_string())
+    } else {
+        Err("Motor is not connected".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn motor_set_position(position: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let motor_guard = state.motor.lock().await;
+    if let Some(motor) = motor_guard.as_ref() {
+        motor.send_running_command(&MotorRunCommand::SetPosition(position)).await.map_err(|e| e.to_string())
     } else {
         Err("Motor is not connected".to_string())
     }
