@@ -1,15 +1,16 @@
 import { useEffect } from "react";
 import "uplot/dist/uPlot.min.css";
 import {
-  feedbackAtom,
   MotorFeedbackState,
   useMotorFeedbackListener,
 } from "@/stores/feedback.ts";
-import { atom, useAtom, useAtomValue } from "jotai";
+import { atom, useAtom } from "jotai";
 import { Button } from "@/components/ui/button.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { WaveformControlPanel } from "@/components/plot/waveform-control-panel.tsx";
+import { WaveformContainer } from "@/components/plot/waveform-container.tsx";
 
 const feedbackBtnMap: {
   label: string;
@@ -49,18 +50,19 @@ export default function Chart() {
     };
   }, [listener]);
 
-  const data = useAtomValue(feedbackAtom);
-
   return (
     <div className="w-full h-full flex flex-col items-stretch p-4 gap-2">
-      <div
-        id="chart"
-        className="bg-blend-darken h-1/2 min-h-72 bg-purple-500 rounded-md"
-      >
-        <div className="h-full w-full flex items-center justify-center">
-          波形图！
+      <div id="chart" className="bg-blend-darken bg-purple-500 rounded-md">
+        <div className="flex flex-col h-full w-full p-4 bg-gray-950 text-white gap-4">
+          {/* control panel */}
+
+          {/* waveform display */}
+          <div className="flex-1 flex justify-center items-center">
+            <WaveformContainer />
+          </div>
         </div>
       </div>
+      <WaveformControlPanel />
       <div className="flex flex-col gap-2 my-4">
         <Label>设置反馈类型</Label>
         <div className="w-full flex gap-2">
