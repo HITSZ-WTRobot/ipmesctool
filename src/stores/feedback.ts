@@ -1,4 +1,4 @@
-import { atom, useAtom } from "jotai";
+import { atom } from "jotai";
 import { listen } from "@tauri-apps/api/event";
 
 export interface Timestamped<T> {
@@ -8,21 +8,13 @@ export interface Timestamped<T> {
 
 const MAX_HISTORY = 100000;
 
-// 支持的反馈类型及对应值类型
-export type MotorFeedbackValueMap = {
-  speed: number;
-  position: number;
-  iabc: [number, number, number];
-  udc: number;
-};
-
 export interface MotorFeedbackEvent {
   type: MotorFeedbackType;
-  value: number | [number, number, number];
+  value: number[];
   timestamp: number;
 }
 
-export type MotorFeedbackType = keyof MotorFeedbackValueMap;
+export type MotorFeedbackType = "speed" | "position" | "iabc" | "udc";
 
 export type MotorFeedbackState =
   | "None"
@@ -31,61 +23,51 @@ export type MotorFeedbackState =
   | "Current"
   | "Udc";
 
-// 统一的 feedback atom
-export const feedbackAtom = atom<{
-  [K in MotorFeedbackType]: Timestamped<MotorFeedbackValueMap[K]>[];
-}>({
+// ============================
+// 1. 全局高性能 buffer（不在 jotai 内部）
+// ============================
+
+export const motorFeedbackBuffer: Record<
+  MotorFeedbackType,
+  Timestamped<number[]>[]
+> = {
   speed: [],
   position: [],
   iabc: [],
   udc: [],
-});
+};
+
+// 高性能 push（避免数组拷贝）
+function pushData(type: MotorFeedbackType, entry: Timestamped<number[]>) {
+  const arr = motorFeedbackBuffer[type];
+  arr.push(entry);
+  if (arr.length > MAX_HISTORY) arr.shift();
+}
+
+// ============================
+// 2. Jotai 只负责 UI 状态，不存数据
+// ============================
+
+export const feedbackStateAtom = atom<MotorFeedbackType>("speed");
+
+// 是否暂停
+export const feedbackPausedAtom = atom(false);
+
+// 显示窗口（例如最近多少 ms）
+export const feedbackWindowMsAtom = atom(5000);
+
+// ============================
+// 3. 串口监听，只更新 buffer，不触发渲染
+// ============================
 
 export function useMotorFeedbackListener() {
-  const [, setFeedback] = useAtom(feedbackAtom);
-
-  const setterMap = {
-    speed: (entry: Timestamped<number>) =>
-      setFeedback((prev) => ({
-        ...prev,
-        speed: [...prev.speed, entry].slice(-MAX_HISTORY),
-      })),
-    position: (entry: Timestamped<number>) =>
-      setFeedback((prev) => ({
-        ...prev,
-        position: [...prev.position, entry].slice(-MAX_HISTORY),
-      })),
-    iabc: (entry: Timestamped<[number, number, number]>) =>
-      setFeedback((prev) => ({
-        ...prev,
-        iabc: [...prev.iabc, entry].slice(-MAX_HISTORY),
-      })),
-    udc: (entry: Timestamped<number>) =>
-      setFeedback((prev) => ({
-        ...prev,
-        udc: [...prev.udc, entry].slice(-MAX_HISTORY),
-      })),
-  };
-
   return () =>
     listen<MotorFeedbackEvent>("motor_feedback_update", (event) => {
       const { type, timestamp, value } = event.payload;
-      switch (type) {
-        case "speed":
-          setterMap.speed({ timestamp, value: value as number });
-          break;
-        case "position":
-          setterMap.position({ timestamp, value: value as number });
-          break;
-        case "iabc":
-          setterMap.iabc({
-            timestamp,
-            value: value as [number, number, number],
-          });
-          break;
-        case "udc":
-          setterMap.udc({ timestamp, value: value as number });
-          break;
-      }
+
+      pushData(type, {
+        timestamp,
+        value: (type === "iabc" ? value : [value]) as number[],
+      });
     });
 }
