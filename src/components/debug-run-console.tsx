@@ -1,8 +1,7 @@
 import { useAtom, useAtomValue } from "jotai";
-import { motorDebugRunStateAtom, motorStateAtom } from "@/stores/motor.ts";
+import { motorDebugRunStateAtom } from "@/stores/motor.ts";
 import { ButtonGroup, ButtonGroupText } from "@/components/ui/button-group.tsx";
 import { Label } from "@/components/ui/label.tsx";
-import { Input } from "@/components/ui/input.tsx";
 import { useCallback, useState } from "react";
 import {
   AngleUnit,
@@ -16,9 +15,9 @@ import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { useDegAtom, useRpmAtom } from "@/stores/angle.ts";
 import { deg2rad, rpm2rps } from "@/lib/utils.ts";
+import { NumericExpressionInput } from "@/components/numeric-expression-input.tsx";
 
 export default function DebugRunConsole() {
-  const [motorState, setMotorState] = useAtom(motorStateAtom);
   const [runState, setRunState] = useAtom(motorDebugRunStateAtom);
   const useRpm = useAtomValue(useRpmAtom);
   const useDeg = useAtomValue(useDegAtom);
@@ -27,6 +26,34 @@ export default function DebugRunConsole() {
   const [position, setPosition] = useState<number>(0);
   useAngleConverter({ value: position, setValue: setPosition });
   useSpeedConverter({ value: speed, setValue: setSpeed });
+
+  const emitSpeed = useCallback(
+    async (s: number) => {
+      try {
+        await invoke("motor_set_speed", {
+          speed: useRpm ? rpm2rps(s) : s,
+        });
+        setRunState("Speed");
+      } catch (e) {
+        toast.error(`Error: ${e}`);
+      }
+    },
+    [setRunState, useRpm],
+  );
+
+  const emitPosition = useCallback(
+    async (p: number) => {
+      try {
+        await invoke("motor_set_position", {
+          position: useDeg ? deg2rad(p) : p,
+        });
+        setRunState("Position");
+      } catch (e) {
+        toast.error(`Error: ${e}`);
+      }
+    },
+    [setRunState, useDeg],
+  );
 
   const stop = useCallback(async () => {
     try {
@@ -46,12 +73,11 @@ export default function DebugRunConsole() {
               Speed
             </Label>
           </ButtonGroupText>
-          <Input
+          <NumericExpressionInput
             id="Speed"
-            className="w-32"
-            type="number"
             value={speed}
-            onChange={(e) => setSpeed(e.target.valueAsNumber)}
+            onValueChange={setSpeed}
+            onEnter={emitSpeed}
           />
           <ButtonGroupText asChild>
             <Label className="w-18" htmlFor="Speed">
@@ -61,16 +87,7 @@ export default function DebugRunConsole() {
           <Button
             variant="outline"
             size="icon"
-            onClick={async () => {
-              try {
-                await invoke("motor_set_speed", {
-                  speed: useRpm ? rpm2rps(speed) : speed,
-                });
-                setRunState("Speed");
-              } catch (e) {
-                toast.error(`Error: ${e}`);
-              }
-            }}
+            onClick={() => emitSpeed(speed)}
           >
             <ArrowDownLeft />
           </Button>
@@ -81,12 +98,11 @@ export default function DebugRunConsole() {
               Position
             </Label>
           </ButtonGroupText>
-          <Input
+          <NumericExpressionInput
             id="Position"
-            className="w-32"
-            type="number"
             value={position}
-            onChange={(e) => setPosition(e.target.valueAsNumber)}
+            onValueChange={setPosition}
+            onEnter={emitPosition}
           />
           <ButtonGroupText asChild>
             <Label className="w-18" htmlFor="Position">
@@ -96,16 +112,7 @@ export default function DebugRunConsole() {
           <Button
             variant="outline"
             size="icon"
-            onClick={async () => {
-              try {
-                await invoke("motor_set_position", {
-                  position: useDeg ? deg2rad(position) : position,
-                });
-                setRunState("Position");
-              } catch (e) {
-                toast.error(`Error: ${e}`);
-              }
-            }}
+            onClick={() => emitPosition(position)}
           >
             <ArrowDownLeft />
           </Button>
