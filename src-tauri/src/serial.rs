@@ -1,8 +1,9 @@
-use log::{debug, error, info};
+use crate::exit_signal::ExitSignal;
+use log::{debug, error};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
@@ -15,9 +16,8 @@ pub struct SerialDevice {
     pub connected: AtomicBool,
     /// 串口接收事件广播
     pub recv_event_tx: broadcast::Sender<String>,
-    recv_loop_running: AtomicBool,
     recv_loop_handle: Mutex<Option<JoinHandle<()>>>,
-    recv_loop_notify: Notify,
+    recv_loop_exit_signal: Arc<ExitSignal>,
 }
 
 impl SerialDevice {
@@ -31,9 +31,8 @@ impl SerialDevice {
             writer: Mutex::new(None),
             connected: AtomicBool::new(false),
             recv_event_tx,
-            recv_loop_running: AtomicBool::new(false),
             recv_loop_handle: Mutex::new(None),
-            recv_loop_notify: Notify::new(),
+            recv_loop_exit_signal: ExitSignal::new(),
         })
     }
 
@@ -45,7 +44,6 @@ impl SerialDevice {
         *self.writer.lock().await = Some(writer);
         self.connected.store(true, Ordering::Relaxed);
         // 启动读取任务
-        self.recv_loop_running.store(true, Ordering::Relaxed);
         let this = Arc::clone(self);
         let handle = tokio::spawn(async move {
             this.read_loop().await;
@@ -59,10 +57,6 @@ impl SerialDevice {
         let mut cache = String::new();
 
         loop {
-            if !self.recv_loop_running.load(Ordering::Relaxed) {
-                return;
-            }
-
             let mut guard = self.reader.lock().await;
             let port = match guard.as_mut() {
                 Some(p) => p,
@@ -94,8 +88,7 @@ impl SerialDevice {
                         }
                     }
                 }
-                _ = self.recv_loop_notify.notified() => {
-                    info!("read interrupted by another task");
+                _ = self.recv_loop_exit_signal.wait() => {
                     return;
                 }
             }
@@ -125,8 +118,7 @@ impl SerialDevice {
 
     async fn handle_disconnect(&self) {
         self.connected.store(false, Ordering::Relaxed);
-        self.recv_loop_running.store(false, Ordering::Relaxed);
-        self.recv_loop_notify.notify_one();
+        self.recv_loop_exit_signal.trigger();
         // 清空 port
         *self.writer.lock().await = None;
         *self.reader.lock().await = None;

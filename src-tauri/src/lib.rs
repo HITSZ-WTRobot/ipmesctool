@@ -11,6 +11,7 @@ mod command;
 mod config_parser;
 mod invokes;
 mod calibration_parser;
+mod exit_signal;
 
 pub fn start_serial_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
