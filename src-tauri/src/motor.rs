@@ -2,15 +2,17 @@ use crate::calibration_parser::CalibrationParser;
 use crate::command::{MotorCalibrationCommand, MotorConfigCommand, MotorConfigSave, MotorFeedbackCommand, MotorRunCommand, MotorState};
 use crate::config_parser::{ConfigParser, MotorConfig};
 use crate::error::MotorError;
+use crate::exit_signal::ExitSignal;
 use crate::serial::SerialDevice;
 use log::{error, warn};
 use scan_fmt::scan_fmt;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use tauri::{AppHandle, Emitter, Manager};
+use tokio::select;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
@@ -53,7 +55,7 @@ pub struct Motor {
     pub unsaved: AtomicBool, // 是否有未保存的配置
 
     parser_feedback_handle: Mutex<Option<JoinHandle<()>>>,
-    parser_feedback_running: AtomicBool,
+    parser_feedback_exit_signal: Arc<ExitSignal>,
 
     // pub speed_history: Mutex<VecDeque<Timestamped<f32>>>,
     // pub position_history: Mutex<VecDeque<Timestamped<f32>>>,
@@ -74,7 +76,7 @@ impl Motor {
             // udc_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
             unsaved: AtomicBool::new(false),
             parser_feedback_handle: Default::default(),
-            parser_feedback_running: AtomicBool::new(false),
+            parser_feedback_exit_signal: ExitSignal::new(),
         })
     }
 
@@ -267,14 +269,13 @@ impl Motor {
 
     pub async fn start_parse_feedback_loop(self: &Arc<Self>) {
         let this = Arc::clone(self);
-        self.parser_feedback_running.store(true, Ordering::Relaxed);
         *self.parser_feedback_handle.lock().await = Some(tokio::spawn(async move {
             let _ = this.parse_feedback_loop().await;
         }));
     }
 
     pub async fn stop_parse_feedback_loop(self: &Arc<Self>) {
-        self.parser_feedback_running.store(false, Ordering::Relaxed);
+        self.parser_feedback_exit_signal.trigger();
         if let Some(handle) = self.parser_feedback_handle.lock().await.take() {
             let _ = handle.await;
         }
@@ -285,29 +286,32 @@ impl Motor {
 
         // 循环解析串口消息
         loop {
-            if !self.parser_feedback_running.load(Relaxed) {
-                return;
-            }
-            // 等待单条串口消息
-            let line_result = rx.recv().await;
+            // 等待单条串口消息，或中断退出
+            select! {
+                // 收到一行串口消息
+                line_result = rx.recv() => {
+                    let line_result = match line_result {
+                        Ok(v) => v,
+                        Err(_) => break, // channel 关闭
+                    };
 
-            let current_feedback = {
-                let fb = self.feedback.lock().await;
-                *fb
-            };
-
-            match line_result {
-                Ok(line) => {
-                    let line = line.trim();
+                    let line = line_result.trim();
                     if line.is_empty() {
                         continue;
                     }
-                    if line == "__DISCONNECTED__".to_string() {
-                        // 串口被关闭
+
+                    if line == "__DISCONNECTED__" {
                         self.app.emit("motor-disconnected", ()).unwrap();
                         break;
                     }
+
                     self.app.emit("serial-received", line).unwrap();
+
+                    let current_feedback = {
+                        let fb = self.feedback.lock().await;
+                        *fb
+                    };
+
                     match current_feedback {
                         MotorFeedbackState::Speed => {
                             if let Ok(speed) = scan_fmt!(line, "speed: {}", f32) {
@@ -352,14 +356,8 @@ impl Motor {
                         MotorFeedbackState::None => { continue; }
                     }
                 }
-                Err(_) => {
-                    // recv 错误，通常是广播关闭
-                    break;
-                }
+                _ = self.parser_feedback_exit_signal.wait() => return,
             }
         }
-
-        self.parser_feedback_running.store(false, Ordering::Relaxed);
-        *self.parser_feedback_handle.lock().await = None;
     }
 }
