@@ -24,7 +24,7 @@ export default function SaveConfigButton() {
   return (
     <Button
       variant={unsaved ? "destructive" : "outline"}
-      disabled={saving}
+      disabled={saving || !unsaved}
       onClick={save}
     >
       {saving && <Spinner />}

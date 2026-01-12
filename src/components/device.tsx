@@ -52,12 +52,14 @@ export default function Device({
       toast.error(`get config failed!\n${e}`);
       // 获取配置失败，不是我们的设备，关闭连接
       await disconnect();
+      setConnecting(false);
     }
-  }, [setConnected, setMotorConfig]);
+  }, [setConnected, setMotorConfig, setConnecting]);
 
   useEffect(() => {
     const md = listen("motor-disconnected", () => {
       setConnected(false);
+      setConnecting(false);
       disconnect().then();
     });
     invoke("list_serial_ports").then((ports) => {
@@ -72,7 +74,7 @@ export default function Device({
       md.then((unlisten) => unlisten());
       spc.then((unlisten) => unlisten());
     };
-  }, [setConnected, setPortList]);
+  }, [setConnected, setConnecting, setPortList]);
 
   useEffect(() => {
     if (selected && !portList.includes(selected)) {
