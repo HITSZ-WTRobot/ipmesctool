@@ -52,12 +52,10 @@ export default function EncoderConfig() {
   }, [motorConfig, setEncoderConfig, useDeg]);
 
   useEffect(() => {
-    // if (encoderConfig === null && motorConfig) {
-    // 当电机配置更新时，无论有没有缓存，均被清除
     if (motorConfig) {
       refresh();
     }
-  }, [encoderConfig, motorConfig, refresh]);
+  }, [motorConfig, refresh]);
 
   useAngleConverter({
     value: encoderConfig?.encoder_offset ?? 0,
