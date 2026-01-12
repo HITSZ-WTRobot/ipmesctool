@@ -1,4 +1,4 @@
-import { atom, useAtom, useAtomValue } from "jotai";
+import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
   EncoderConfig as EncoderConfigType,
   EncoderDirection,
@@ -31,7 +31,6 @@ import {
 import { AngleUnit, useAngleConverter } from "@/components/unit.tsx";
 import { useDegAtom } from "@/stores/angle.ts";
 import { invoke } from "@tauri-apps/api/core";
-import { useSetAtom } from "jotai/index";
 
 const encoderConfigAtom = atom<EncoderConfigType | null>(null);
 
@@ -53,7 +52,9 @@ export default function EncoderConfig() {
   }, [motorConfig, setEncoderConfig, useDeg]);
 
   useEffect(() => {
-    if (encoderConfig === null && motorConfig) {
+    // if (encoderConfig === null && motorConfig) {
+    // 当电机配置更新时，无论有没有缓存，均被清除
+    if (motorConfig) {
       refresh();
     }
   }, [encoderConfig, motorConfig, refresh]);

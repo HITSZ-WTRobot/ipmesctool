@@ -5,7 +5,11 @@ import { pageAtom, windowLockedAtom } from "@/stores/page.ts";
 import { useAtomValue, useSetAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { motorConfigUnsavedAtom, motorConnectedAtom } from "@/stores/motor.ts";
+import {
+  motorConfigAtom,
+  motorConfigUnsavedAtom,
+  motorConnectedAtom,
+} from "@/stores/motor.ts";
 import {
   Card,
   CardContent,
@@ -13,12 +17,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card.tsx";
+import { MotorConfig } from "@/motor.ts";
 
 export default function Calibration() {
   const connected = useAtomValue(motorConnectedAtom);
   const setLocked = useSetAtom(windowLockedAtom);
   const setPage = useSetAtom(pageAtom);
   const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
+  const setConfig = useSetAtom(motorConfigAtom);
   const [calibrating, setCalibrating] = useState<boolean>(false);
 
   const startCalibration = useCallback(async () => {
@@ -37,7 +43,13 @@ export default function Calibration() {
       setCalibrating(false);
 
       toast.dismiss();
-      toast.success("校准完成，请点击左侧保存按钮将配置保存到 Flash");
+      toast.loading("校准完成，正在刷新数据...");
+
+      const newConfig: MotorConfig = await invoke("refresh_motor_config");
+      setConfig(newConfig);
+
+      toast.dismiss();
+      toast.success("请点击左侧保存按钮将配置保存到 Flash");
     } catch (err) {
       setLocked(false);
       setCalibrating(false);
@@ -46,7 +58,7 @@ export default function Calibration() {
       toast.error("校准失败，请检查设备或串口输出");
       throw err;
     }
-  }, [setLocked, setPage, setUnsaved]);
+  }, [setLocked, setPage, setUnsaved, setConfig]);
   if (!connected) {
     return <div>电机未连接</div>;
   }

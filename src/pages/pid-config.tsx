@@ -41,6 +41,7 @@ function SinglePIDConfig<T extends Record<string, number>>({
   value,
   setValue,
   labels,
+  hasDiff,
   reload,
   save,
 }: {
@@ -48,6 +49,7 @@ function SinglePIDConfig<T extends Record<string, number>>({
   value: T;
   setValue: (v: T) => void;
   labels: Record<keyof T, string>;
+  hasDiff: boolean;
   reload: () => void;
   save: () => void;
 }) {
@@ -57,7 +59,11 @@ function SinglePIDConfig<T extends Record<string, number>>({
         <CardHeader>
           <CardTitle className="text-base">{name}</CardTitle>
           <CardAction>
-            <Button variant="ghost" size="icon-sm" onClick={() => reload()}>
+            <Button
+              variant={hasDiff ? "destructive" : "ghost"}
+              size="icon-sm"
+              onClick={() => reload()}
+            >
               <RefreshCcw />
             </Button>
             <Button variant="ghost" size="icon-sm" onClick={() => save()}>
@@ -100,6 +106,7 @@ function MultiPIConfigWithLock<T extends Record<string, number>>({
   name,
   pi,
   warning,
+  hasDiff,
   reload,
   save,
 }: {
@@ -110,6 +117,7 @@ function MultiPIConfigWithLock<T extends Record<string, number>>({
     setValue: (v: T) => void;
     labels: Record<keyof T, string>;
   }[];
+  hasDiff: boolean;
   reload: () => void;
   save: () => void;
 }) {
@@ -124,7 +132,7 @@ function MultiPIConfigWithLock<T extends Record<string, number>>({
               {unlock ? (
                 <>
                   <Button
-                    variant="ghost"
+                    variant={hasDiff ? "destructive" : "ghost"}
                     size="icon-sm"
                     onClick={() => reload()}
                   >
@@ -250,6 +258,7 @@ export default function PidConfig() {
         value={positionPID}
         setValue={setPositionPID}
         labels={{ kp: "Kp", ki: "Ki", kd: "Kd", output_max: "OutputMax" }}
+        hasDiff={positionPID !== motorConfig.position_pid}
         reload={() => setPositionPID({ ...motorConfig.position_pid })}
         save={async () => {
           try {
@@ -276,6 +285,7 @@ export default function PidConfig() {
         name="Speed PI"
         value={speedPI}
         setValue={setSpeedPI}
+        hasDiff={speedPI !== motorConfig.speed_pi}
         labels={{ kp: "Kp", ki: "Ki", output_max: "OutputMax" }}
         reload={() => setSpeedPI({ ...motorConfig.speed_pi })}
         save={async () => {
@@ -310,6 +320,10 @@ export default function PidConfig() {
             labels: { kp: "Iq Kp", ki: "Iq Ki" },
           },
         ]}
+        hasDiff={
+          currentIdPI !== motorConfig.current_id_pi ||
+          currentIqPI !== motorConfig.current_iq_pi
+        }
         reload={() => {
           setCurrentIdPI({ ...motorConfig.current_id_pi });
           setCurrentIqPI({ ...motorConfig.current_iq_pi });
