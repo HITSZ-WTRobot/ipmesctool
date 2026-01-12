@@ -305,12 +305,16 @@ impl Motor {
                         break;
                     }
 
-                    self.app.emit("serial-received", line).unwrap();
+//                     self.app.emit("serial-received", line).unwrap();
 
                     let current_feedback = {
                         let fb = self.feedback.lock().await;
                         *fb
                     };
+                    // 由于 feedback 频率太高，会导致前端收到数据太多爆满，串口只回传非反馈信息
+                                        if current_feedback == MotorFeedbackState::None {
+                                            self.app.emit("serial-received", line).unwrap();
+                                        }
 
                     match current_feedback {
                         MotorFeedbackState::Speed => {
