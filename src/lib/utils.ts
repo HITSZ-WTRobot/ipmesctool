@@ -6,7 +6,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function setPartValue<T>(
-  setter: (v: T) => void,
+  setter: (_: T) => void,
   prev: T,
   key: keyof T,
   value: T[keyof T],
@@ -38,17 +38,22 @@ export function filterNumericExpression(input: string): string {
   return input.replace(/[^0-9+\-*/().]/g, "");
 }
 
-// 计算表达式（安全版本，不使用 eval）
-export function safeEvalExpression(expr: string): number | null {
+// 计算表达式
+export function evalExpression(expr: string): number | null {
   try {
-    // 基本安全检查
     if (!/^[0-9+\-*/().\s]+$/.test(expr)) return null;
-
-    // Function 比 eval 更可控（仍然需用户输入受控）
     const fn = new Function(`return (${expr})`);
     const result = fn();
     return typeof result === "number" && !isNaN(result) ? result : null;
   } catch {
     return null;
   }
+}
+
+export function shallowEqual<T extends Record<string, unknown>>(
+  a: T,
+  b: T,
+): boolean {
+  const keys = Object.keys(a) as (keyof T)[];
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }

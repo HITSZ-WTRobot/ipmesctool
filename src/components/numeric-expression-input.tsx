@@ -1,7 +1,7 @@
 import {
   cn,
   filterNumericExpression,
-  safeEvalExpression,
+  evalExpression,
 } from "@/lib/utils.ts";
 import React, { useCallback, useEffect, useState } from "react";
 import { Input } from "@/components/ui/input.tsx";
@@ -31,7 +31,7 @@ export function NumericExpressionInput({
   // commit 不依赖 raw，而是接受一个字符串参数
   const commit = useCallback(
     (text: string): number | undefined => {
-      const result = safeEvalExpression(text);
+      const result = evalExpression(text);
       if (result === null) {
         // 表达式无法计算，保持原样
         return undefined;
