@@ -10,6 +10,16 @@ pub enum MotorState {
     Fault,
 }
 
+impl MotorState {
+    fn is_stop(&self) -> bool {
+        matches!(self, MotorState::Stop)
+    }
+
+    fn allows_run_command(&self) -> bool {
+        matches!(self, MotorState::Stop | MotorState::DebugRun)
+    }
+}
+
 pub enum MotorFeedbackCommand {
     GetSpeed,
     GetPosition,
@@ -40,16 +50,10 @@ impl MotorRunCommand {
     pub fn to_string(&self, state: &MotorState) -> Option<String> {
         match self {
             MotorRunCommand::SetSpeed(speed) => {
-                match state {
-                    MotorState::Stop | MotorState::DebugRun => Some(format!("set_speed {}\r\n", speed)),
-                    _ => None,
-                }
+                state.allows_run_command().then(|| format!("set_speed {}\r\n", speed))
             }
             MotorRunCommand::SetPosition(pos) => {
-                match state {
-                    MotorState::Stop | MotorState::DebugRun => Some(format!("set_position {}\r\n", pos)),
-                    _ => None,
-                }
+                state.allows_run_command().then(|| format!("set_position {}\r\n", pos))
             }
             MotorRunCommand::Stop => Some("stop\r\n".into()),
         }
@@ -68,62 +72,32 @@ pub enum MotorConfigCommand {
 
 impl MotorConfigCommand {
     pub fn to_string(&self, state: &MotorState) -> Option<String> {
+        if !state.is_stop() {
+            return None;
+        }
         match self {
             MotorConfigCommand::ConfigPositionPid { kp, ki, kd, output_max } => {
-                if output_max <= &0f32 {
-                    None
-                } else {
-                    match state {
-                        MotorState::Stop => Some(format!("config_position_pid {} {} {} {}\r\n", kp, ki, kd, output_max)),
-                        _ => None,
-                    }
-                }
+                if *output_max <= 0f32 { return None; }
+                Some(format!("config_position_pid {} {} {} {}\r\n", kp, ki, kd, output_max))
             }
-
             MotorConfigCommand::ConfigSpeedPi { kp, ki, output_max } => {
-                if output_max <= &0f32 {
-                    None
-                } else {
-                    match state {
-                        MotorState::Stop => Some(format!("config_speed_pi {} {} {}\r\n", kp, ki, output_max)),
-                        _ => None,
-                    }
-                }
+                if *output_max <= 0f32 { return None; }
+                Some(format!("config_speed_pi {} {} {}\r\n", kp, ki, output_max))
             }
-
             MotorConfigCommand::ConfigCurrentPi { id_kp, id_ki, iq_kp, iq_ki } => {
-                match state {
-                    MotorState::Stop => Some(format!("config_current_pi {id_kp} {id_ki} {iq_kp} {iq_ki}\r\n")),
-                    _ => None,
-                }
+                Some(format!("config_current_pi {id_kp} {id_ki} {iq_kp} {iq_ki}\r\n"))
             }
-
             MotorConfigCommand::ConfigIdqFilter(fc) => {
-                match state {
-                    MotorState::Stop => Some(format!("config_idq_filter {}\r\n", fc)),
-                    _ => None,
-                }
+                Some(format!("config_idq_filter {}\r\n", fc))
             }
-
             MotorConfigCommand::ConfigEncoder { pole_pairs, encoder_direct, encoder_offset, encoder_type } => {
-                match state {
-                    MotorState::Stop => Some(format!("config_encoder {} {} {} {}\r\n", pole_pairs, encoder_direct, encoder_offset, encoder_type)),
-                    _ => None,
-                }
+                Some(format!("config_encoder {} {} {} {}\r\n", pole_pairs, encoder_direct, encoder_offset, encoder_type))
             }
-
             MotorConfigCommand::ConfigId(id) => {
-                match state {
-                    MotorState::Stop => Some(format!("config_id {}\r\n", id)),
-                    _ => None,
-                }
+                Some(format!("config_id {}\r\n", id))
             }
-
             MotorConfigCommand::ConfigUdc(udc) => {
-                match state {
-                    MotorState::Stop => Some(format!("config_udc {}\r\n", udc)),
-                    _ => None,
-                }
+                Some(format!("config_udc {}\r\n", udc))
             }
         }
     }
@@ -133,26 +107,16 @@ pub struct MotorConfigSave;
 
 impl MotorConfigSave {
     pub fn to_string(&self, state: &MotorState) -> Option<String> {
-        match state {
-            MotorState::Stop => Some("save\r\n".into()),
-            _ => None,
-        }
+        state.is_stop().then(|| "save\r\n".into())
     }
 }
 
 pub enum MotorCalibrationCommand {
-    Calibration
+    Calibration,
 }
 
 impl MotorCalibrationCommand {
     pub fn to_string(&self, state: &MotorState) -> Option<String> {
-        match self {
-            MotorCalibrationCommand::Calibration => {
-                match state {
-                    MotorState::Stop => Some("calibration\r\n".into()),
-                    _ => None,
-                }
-            }
-        }
+        state.is_stop().then(|| "calibration\r\n".into())
     }
 }

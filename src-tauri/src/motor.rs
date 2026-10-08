@@ -36,6 +36,23 @@ impl<T> Timestamped<T> {
 }
 
 
+fn try_parse_and_emit<T: Serialize + Clone>(
+    line: &str,
+    app: &AppHandle,
+    type_name: &str,
+    warn_label: &str,
+    parse: impl FnOnce(&str) -> Option<T>,
+) {
+    match parse(line) {
+        Some(value) => {
+            if let Err(e) = app.emit("motor_feedback_update", Timestamped::new(value, type_name.to_string())) {
+                error!("Tauri emit error {e}");
+            }
+        }
+        None => warn!("Failed to parse {} feedback: {}", warn_label, line),
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MotorFeedbackState {
     None,
@@ -210,7 +227,7 @@ impl Motor {
                 while let Ok(line) = rx.recv().await {
                     match parser.parse(&line) {
                         Ok(_) => {
-                            self.app.emit("calibration-state", &parser.0).unwrap();
+                            self.app.emit("calibration-state", &parser.state).unwrap();
                             if parser.is_done() {
                                 return Ok(());
                             }
@@ -284,18 +301,15 @@ impl Motor {
     async fn parse_feedback_loop(self: Arc<Self>) {
         let mut rx = self.serial.recv_event_tx.subscribe();
 
-        // 循环解析串口消息
         loop {
-            // 等待单条串口消息，或中断退出
             select! {
-                // 收到一行串口消息
                 line_result = rx.recv() => {
-                    let line_result = match line_result {
+                    let line = match line_result {
                         Ok(v) => v,
-                        Err(_) => break, // channel 关闭
+                        Err(_) => break,
                     };
 
-                    let line = line_result.trim();
+                    let line = line.trim();
                     if line.is_empty() {
                         continue;
                     }
@@ -305,58 +319,33 @@ impl Motor {
                         break;
                     }
 
-                    //self.app.emit("serial-received", line).unwrap();
-                    let current_feedback = {
-                        let fb = self.feedback.lock().await;
-                        *fb
-                    };
-                    // 由于 feedback 频率太高，会导致前端收到数据太多爆满，串口只回传非反馈信息
+                    let current_feedback = *self.feedback.lock().await;
                     if current_feedback == MotorFeedbackState::None {
                         self.app.emit("serial-received", line).unwrap();
                     }
 
                     match current_feedback {
                         MotorFeedbackState::Speed => {
-                            if let Ok(speed) = scan_fmt!(line, "speed: {}", f32) {
-                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(speed, "speed".to_string())) {
-                                    error!("Tauri emit error {e}");
-                                }
-                            } else {
-                                warn!("Failed to parse speed feedback: {}", line);
-                                continue;
-                            }
+                            try_parse_and_emit(line, &self.app, "speed", "speed",
+                                |l| scan_fmt!(l, "speed: {}", f32).ok(),
+                            );
                         }
                         MotorFeedbackState::Position => {
-                            if let Ok(position) = scan_fmt!(line, "position: {}", f32) {
-                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(position, "position".to_string())) {
-                                    error!("Tauri emit error {e}");
-                                }
-                            } else {
-                                warn!("Failed to parse position feedback: {}", line);
-                                continue;
-                            }
+                            try_parse_and_emit(line, &self.app, "position", "position",
+                                |l| scan_fmt!(l, "position: {}", f32).ok(),
+                            );
                         }
                         MotorFeedbackState::Current => {
-                            if let Ok((ia, ib, ic)) = scan_fmt!(line, "iabc:{},{},{}", f32, f32, f32) {
-                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new((ia, ib, ic), "iabc".to_string())) {
-                                    error!("Tauri emit error {e}");
-                                }
-                            } else {
-                                warn!("Failed to parse current feedback: {}", line);
-                                continue;
-                            }
+                            try_parse_and_emit(line, &self.app, "iabc", "current",
+                                |l| scan_fmt!(l, "iabc:{},{},{}", f32, f32, f32).ok(),
+                            );
                         }
                         MotorFeedbackState::Udc => {
-                            if let Ok(udc) = scan_fmt!(line, "udc: {}", f32) {
-                                if let Err(e) = self.app.emit("motor_feedback_update", Timestamped::new(udc, "udc".to_string())) {
-                                    error!("Tauri emit error {e}");
-                                }
-                            } else {
-                                warn!("Failed to parse udc feedback: {}", line);
-                                continue;
-                            }
+                            try_parse_and_emit(line, &self.app, "udc", "udc",
+                                |l| scan_fmt!(l, "udc: {}", f32).ok(),
+                            );
                         }
-                        MotorFeedbackState::None => { continue; }
+                        MotorFeedbackState::None => {}
                     }
                 }
                 _ = self.parser_feedback_exit_signal.wait() => return,

@@ -113,64 +113,43 @@ impl ConfigParser {
         }
     }
     pub fn is_complete(&self) -> bool {
-        self.id.is_some()
-            && self.udc.is_some()
-            && self.idq_filter_fc.is_some()
-            // position_pid
-            && self.position_pid.kp.is_some()
-            && self.position_pid.ki.is_some()
-            && self.position_pid.kd.is_some()
-            && self.position_pid.maxoutput.is_some()
-            // speed_pi
-            && self.speed_pi.kp.is_some()
-            && self.speed_pi.ki.is_some()
-            && self.speed_pi.maxoutput.is_some()
-            // current i_pi
-            && self.i_pi.id_kp.is_some()
-            && self.i_pi.id_ki.is_some()
-            && self.i_pi.iq_kp.is_some()
-            && self.i_pi.iq_ki.is_some()
-            // encoder
-            && self.encoder.pole_pairs.is_some()
-            && self.encoder.encoder_direct.is_some()
-            && self.encoder.encoder_offset.is_some()
-            && self.encoder.encoder_type.is_some()
+        macro_rules! all_some {
+            ($($field:expr),+ $(,)?) => { true $(&& $field.is_some())+ };
+        }
+        all_some!(
+            self.id, self.udc, self.idq_filter_fc,
+            self.position_pid.kp, self.position_pid.ki, self.position_pid.kd, self.position_pid.maxoutput,
+            self.speed_pi.kp, self.speed_pi.ki, self.speed_pi.maxoutput,
+            self.i_pi.id_kp, self.i_pi.id_ki, self.i_pi.iq_kp, self.i_pi.iq_ki,
+            self.encoder.pole_pairs, self.encoder.encoder_direct, self.encoder.encoder_offset, self.encoder.encoder_type,
+        )
     }
 
     pub fn try_into_motor_config(&self) -> Result<MotorConfig, &'static str> {
-        // 顶层字段
         let id = self.id.ok_or("id missing")?;
         let udc = self.udc.ok_or("udc missing")?;
         let fc = self.idq_filter_fc.ok_or("idq_filter_fc missing")?;
 
-        // position_pid
         let position_pid = PositionPIDConfig {
             kp: self.position_pid.kp.ok_or("position_pid.kp missing")?,
             ki: self.position_pid.ki.ok_or("position_pid.ki missing")?,
             kd: self.position_pid.kd.ok_or("position_pid.kd missing")?,
             output_max: self.position_pid.maxoutput.ok_or("position_pid.maxoutput missing")?,
         };
-
-        // speed_pi
         let speed_pi = SpeedPIConfig {
             kp: self.speed_pi.kp.ok_or("speed_pi.kp missing")?,
             ki: self.speed_pi.ki.ok_or("speed_pi.ki missing")?,
             output_max: self.speed_pi.maxoutput.ok_or("speed_pi.maxoutput missing")?,
         };
-
-        // current_id_pi
         let current_id_pi = CurrentPIConfig {
             kp: self.i_pi.id_kp.ok_or("i_pi.id_kp missing")?,
             ki: self.i_pi.id_ki.ok_or("i_pi.id_ki missing")?,
         };
-
-        // current_iq_pi
         let current_iq_pi = CurrentPIConfig {
             kp: self.i_pi.iq_kp.ok_or("i_pi.iq_kp missing")?,
             ki: self.i_pi.iq_ki.ok_or("i_pi.iq_ki missing")?,
         };
 
-        // encoder
         let encoder_type_str = self.encoder.encoder_type.as_ref().ok_or("encoder.encoder_type missing")?;
         let encoder_type = encoder_type_str.parse::<EncoderType>().map_err(|_| "invalid encoder_type")?;
         let encoder_direction = match self.encoder.encoder_direct.ok_or("encoder.encoder_direct missing")? {
@@ -185,16 +164,7 @@ impl ConfigParser {
             encoder_type,
         };
 
-        Ok(MotorConfig {
-            id,
-            udc,
-            position_pid,
-            speed_pi,
-            current_id_pi,
-            current_iq_pi,
-            fc,
-            encoder_config,
-        })
+        Ok(MotorConfig { id, udc, position_pid, speed_pi, current_id_pi, current_iq_pi, fc, encoder_config })
     }
 }
 

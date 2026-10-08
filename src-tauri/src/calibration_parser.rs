@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[derive(PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum ParserState {
     Idle,
     TestPolePairs,
@@ -13,18 +12,20 @@ pub enum ParserState {
     Done,
 }
 
-pub struct CalibrationParser(pub ParserState);
+pub struct CalibrationParser {
+    pub state: ParserState,
+}
 
 impl CalibrationParser {
     pub fn new() -> Self {
-        Self(ParserState::Idle)
+        Self { state: ParserState::Idle }
     }
 
     pub fn parse(&mut self, line: &str) -> Result<(), String> {
-        match self.0 {
+        match self.state {
             ParserState::Idle => {
                 if line.contains("test ready.start test now.") {
-                    self.0 = ParserState::TestPolePairs;
+                    self.state = ParserState::TestPolePairs;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for start".into())
@@ -32,7 +33,7 @@ impl CalibrationParser {
             }
             ParserState::TestPolePairs => {
                 if line.contains("pole_pairs read done") {
-                    self.0 = ParserState::TestEncoderDirection;
+                    self.state = ParserState::TestEncoderDirection;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for pole pairs".into())
@@ -40,7 +41,7 @@ impl CalibrationParser {
             }
             ParserState::TestEncoderDirection => {
                 if line.contains("offset read done.") {
-                    self.0 = ParserState::TestR;
+                    self.state = ParserState::TestR;
                     Ok(())
                 } else if line.contains("offset read failed.") {
                     Err("offset read failed".into())
@@ -50,7 +51,7 @@ impl CalibrationParser {
             }
             ParserState::TestR => {
                 if line.contains("R read done") {
-                    self.0 = ParserState::TestLd;
+                    self.state = ParserState::TestLd;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for R".into())
@@ -58,7 +59,7 @@ impl CalibrationParser {
             }
             ParserState::TestLd => {
                 if line.contains("Ld read done") {
-                    self.0 = ParserState::TestLq;
+                    self.state = ParserState::TestLq;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for Ld".into())
@@ -66,7 +67,7 @@ impl CalibrationParser {
             }
             ParserState::TestLq => {
                 if line.contains("Lq read done") {
-                    self.0 = ParserState::TestSpeedPI;
+                    self.state = ParserState::TestSpeedPI;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for Lq".into())
@@ -74,19 +75,17 @@ impl CalibrationParser {
             }
             ParserState::TestSpeedPI => {
                 if line.contains("Speed PI set done") {
-                    self.0 = ParserState::Done;
+                    self.state = ParserState::Done;
                     Ok(())
                 } else {
                     Err("invalid state, waiting for SpeedPI".into())
                 }
             }
-            ParserState::Done => {
-                Err("invalid state, calibration is done".into())
-            }
+            ParserState::Done => Err("invalid state, calibration is done".into()),
         }
     }
 
     pub fn is_done(&self) -> bool {
-        self.0 == ParserState::Done
+        self.state == ParserState::Done
     }
 }
