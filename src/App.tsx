@@ -13,6 +13,7 @@ import {
 } from "@/components/unit.tsx";
 import { motorConfigUnsavedAtom } from "@/stores/motor.ts";
 import DebugRunConsole from "@/components/debug-run-console.tsx";
+import { ErrorBoundary } from "@/components/error-boundary.tsx";
 
 const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
 const PidConfig = React.lazy(() => import("@/pages/pid-config.tsx"));
@@ -34,9 +35,11 @@ function PersistentPages({ page }: { page: PageID }) {
   const PageComponent = LazyPages[page];
   if (!pageInstances.current[page]) {
     pageInstances.current[page] = (
-      <Suspense fallback={<div>Loading...</div>}>
-        <PageComponent />
-      </Suspense>
+      <ErrorBoundary>
+        <Suspense fallback={<div>Loading...</div>}>
+          <PageComponent />
+        </Suspense>
+      </ErrorBoundary>
     );
   }
 
