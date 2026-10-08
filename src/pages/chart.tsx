@@ -1,6 +1,6 @@
-import { useEffect } from "react";
 import "uplot/dist/uPlot.min.css";
 import {
+  FEEDBACK_OPTIONS,
   MotorFeedbackState,
   useMotorFeedbackListener,
 } from "@/stores/feedback.ts";
@@ -12,43 +12,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { WaveformControlPanel } from "@/components/plot/waveform-control-panel.tsx";
 import { WaveformContainer } from "@/components/plot/waveform-container.tsx";
 
-const feedbackBtnMap: {
-  label: string;
-  state: MotorFeedbackState;
-}[] = [
-  {
-    label: "无反馈",
-    state: "None",
-  },
-  {
-    label: "速度",
-    state: "Speed",
-  },
-  {
-    label: "位置",
-    state: "Position",
-  },
-  {
-    label: "电流",
-    state: "Current",
-  },
-  {
-    label: "电压",
-    state: "Udc",
-  },
-];
-
 const feedbackStateAtom = atom<MotorFeedbackState>("None");
 
 export default function Chart() {
-  const [state, setState] = useAtom(feedbackStateAtom);
-  const listener = useMotorFeedbackListener();
-  useEffect(() => {
-    const ls = listener();
-    return () => {
-      ls.then((unlisten) => unlisten());
-    };
-  }, [listener]);
+  const [, setState] = useAtom(feedbackStateAtom);
+  useMotorFeedbackListener();
 
   return (
     <div className="w-full h-full flex flex-col items-stretch p-4 gap-2">
@@ -66,7 +34,7 @@ export default function Chart() {
       <div className="flex flex-col gap-2 my-4">
         <Label>设置反馈类型</Label>
         <div className="w-full flex gap-2">
-          {feedbackBtnMap.map(({ label, state }) => (
+          {FEEDBACK_OPTIONS.map(({ label, state }) => (
             <Button
               variant="outline"
               key={state}

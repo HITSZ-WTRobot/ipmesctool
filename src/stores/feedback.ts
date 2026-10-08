@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { atom } from "jotai";
 import { listen } from "@tauri-apps/api/event";
 
@@ -22,6 +23,14 @@ export type MotorFeedbackState =
   | "Position"
   | "Current"
   | "Udc";
+
+export const FEEDBACK_OPTIONS: { label: string; state: MotorFeedbackState }[] = [
+  { label: "无反馈", state: "None" },
+  { label: "速度", state: "Speed" },
+  { label: "位置", state: "Position" },
+  { label: "电流", state: "Current" },
+  { label: "电压", state: "Udc" },
+];
 
 // ============================
 // 1. 全局高性能 buffer（不在 jotai 内部）
@@ -61,13 +70,16 @@ export const feedbackWindowMsAtom = atom(5000);
 // ============================
 
 export function useMotorFeedbackListener() {
-  return () =>
-    listen<MotorFeedbackEvent>("motor_feedback_update", (event) => {
+  useEffect(() => {
+    const promise = listen<MotorFeedbackEvent>("motor_feedback_update", (event) => {
       const { type, timestamp, value } = event.payload;
-
       pushData(type, {
         timestamp,
         value: (type === "iabc" ? value : [value]) as number[],
       });
     });
+    return () => {
+      promise.then((unlisten) => unlisten());
+    };
+  }, []);
 }
