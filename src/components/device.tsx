@@ -35,12 +35,11 @@ export default function Device({
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) {
   const [connected, setConnected] = useAtom(motorConnectedAtom);
-  const [connecting, setConnecting] = useState<boolean>(false);
+  const [connecting, setConnecting] = useState(false);
   const [portList, setPortList] = useState<string[]>([]);
   const setMotorConfig = useSetAtom(motorConfigAtom);
   const setMotorState = useSetAtom(motorStateAtom);
-
-  const [selected, setSelected] = useState<string>("");
+  const [selected, setSelected] = useState("");
 
   const getConfigOrDisconnect = useCallback(async () => {
     try {
@@ -48,46 +47,43 @@ export default function Device({
       setMotorConfig(r);
       setConnected(true);
     } catch (e) {
-      console.log(e);
       toast.error(`get config failed!\n${e}`);
-      // 获取配置失败，不是我们的设备，关闭连接
       await disconnect();
       setConnecting(false);
     }
-  }, [setConnected, setMotorConfig, setConnecting]);
+  }, [setConnected, setMotorConfig]);
 
+  // Device events and port monitoring
   useEffect(() => {
     const md = listen("motor-disconnected", () => {
       setConnected(false);
       setConnecting(false);
       disconnect().then();
     });
-    invoke("list_serial_ports").then((ports) => {
-      setPortList(ports as string[]);
-    });
+    invoke("list_serial_ports").then((ports) => setPortList(ports as string[]));
     const spc = listen<string[]>("serial-port-changed", (event) => {
-      const ports = event.payload as string[];
-      setPortList(ports);
+      setPortList(event.payload as string[]);
     });
-
     return () => {
-      md.then((unlisten) => unlisten());
-      spc.then((unlisten) => unlisten());
+      md.then((un) => un());
+      spc.then((un) => un());
     };
-  }, [setConnected, setConnecting, setPortList]);
+  }, [setConnected]);
 
+  // Clear selected port if it disappears from port list
   useEffect(() => {
     if (selected && !portList.includes(selected)) {
       setSelected("");
     }
-  }, [portList, selected, setSelected]);
+  }, [portList, selected]);
 
-  const effectOnceRef = useRef(false);
+  // Auto-reconnect after frontend reload
+  const reconnectedRef = useRef(false);
   useEffect(() => {
-    // 本函数作用是前端重新加载后进行一次数据交互
-    if (effectOnceRef.current) return;
-    effectOnceRef.current = true;
+    if (reconnectedRef.current) return;
+    reconnectedRef.current = true;
     invoke("get_motor_port").then((port) => {
+      if (!port) return;
       setSelected(port as string);
       setConnecting(true);
       getConfigOrDisconnect().then(() => {
@@ -102,7 +98,6 @@ export default function Device({
     try {
       await invoke("connect_motor", { portName: selected, baudRate: 115200 });
       await getConfigOrDisconnect();
-      // 默认 Stop
       setMotorState("Stop");
     } catch (e) {
       console.error(e);
@@ -110,6 +105,7 @@ export default function Device({
     }
     setConnecting(false);
   }, [getConfigOrDisconnect, selected, setMotorState]);
+
   return (
     <div
       className={cn(

@@ -35,8 +35,6 @@ export function MotorState() {
     };
   }, [setMotorState, setUnsaved]);
 
-  console.log(motorConfig);
-
   return motorConfig && connect ? (
     <div className="w-full flex flex-col text-sm gap-2">
       <div className="w-full border rounded-md px-3 py-2 flex flex-col gap-1">

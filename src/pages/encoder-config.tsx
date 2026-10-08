@@ -68,7 +68,6 @@ export default function EncoderConfig() {
     return <div>电机配置未加载</div>;
   }
 
-  console.log(encoderConfig);
   return (
     <div className="w-full p-4 space-y-4">
       <Card>
