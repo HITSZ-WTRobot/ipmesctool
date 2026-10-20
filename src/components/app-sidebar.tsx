@@ -17,7 +17,6 @@ import { pageAtom, PageGroups } from "@/stores/page";
 import { useMemo } from "react";
 import RefreshConfigButton from "@/components/refresh-config-button.tsx";
 import { motorConnectedAtom } from "@/stores/motor.ts";
-import SaveConfigButton from "@/components/save-config-button.tsx";
 
 export default function AppSidebar() {
   const [page, setPage] = useAtom(pageAtom);
@@ -48,12 +47,7 @@ export default function AppSidebar() {
           ))}
         </SidebarContent>
         <SidebarFooter>
-          {connected && (
-            <>
-              <SaveConfigButton />
-              <RefreshConfigButton />
-            </>
-          )}
+          {connected && <RefreshConfigButton />}
           <MotorState />
           <Device />
         </SidebarFooter>

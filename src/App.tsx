@@ -11,7 +11,6 @@ import {
   AngleDisplaySwitcher,
   SpeedDisplaySwitcher,
 } from "@/components/unit.tsx";
-import { motorConfigUnsavedAtom } from "@/stores/motor.ts";
 import DebugRunConsole from "@/components/debug-run-console.tsx";
 import { ErrorBoundary } from "@/components/error-boundary.tsx";
 
@@ -21,7 +20,6 @@ const DeviceInfo = React.lazy(() => import("@/pages/device-info.tsx"));
 
 export const LazyPages = {
   "Debug.Serial": SerialConsole,
-  "Debug.Chart": React.lazy(() => import("@/pages/chart.tsx")),
   "Motor.PID": PidConfig,
   "Motor.Encoder": React.lazy(() => import("@/pages/encoder-config.tsx")),
   "Motor.Calibration": React.lazy(() => import("@/pages/calibration.tsx")),
@@ -61,7 +59,6 @@ function PersistentPages({ page }: { page: PageID }) {
 function App() {
   const page = useAtomValue(pageAtom);
   const locked = useAtomValue(windowLockedAtom);
-  const unsaved = useAtomValue(motorConfigUnsavedAtom);
   useSerialDebug();
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
@@ -71,21 +68,16 @@ function App() {
       <SidebarProvider className="h-screen w-screen">
         <AppSidebar />
         <div className="w-full h-screen flex flex-col items-center">
-          <main className="w-full flex-1 overflow-y-scroll">
+          <main className="w-full flex-1 min-h-0 overflow-y-scroll">
             <PersistentPages page={page} />
           </main>
-          <footer className="flex flex-row w-full h-24 bg-accent gap-4 px-4">
+          <footer className="flex flex-row w-full min-h-32 shrink-0 bg-accent gap-4 px-4">
             <div className="flex flex-col p-1 gap-2 justify-evenly">
               <SpeedDisplaySwitcher />
               <AngleDisplaySwitcher />
             </div>
             <div className="flex-1 h-full p-1">
               <DebugRunConsole />
-            </div>
-            <div className="flex flex-col items-end justify-end p-1">
-              {unsaved && (
-                <span className="text-sm text-red-500">*配置未写入 Flash</span>
-              )}
             </div>
           </footer>
         </div>

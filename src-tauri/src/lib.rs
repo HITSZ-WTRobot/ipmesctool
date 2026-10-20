@@ -4,14 +4,14 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
-mod serial;
-mod motor;
-mod error;
+mod calibration_parser;
 mod command;
 mod config_parser;
-mod invokes;
-mod calibration_parser;
+mod error;
 mod exit_signal;
+mod invokes;
+mod motor;
+mod serial;
 
 pub fn start_serial_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -29,8 +29,7 @@ pub fn start_serial_monitor(app: tauri::AppHandle) {
             if current != last_ports {
                 last_ports = current.clone();
 
-                app.emit("serial-port-changed", current)
-                    .unwrap();
+                app.emit("serial-port-changed", current).unwrap();
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -53,27 +52,25 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-             list_serial_ports,
+            list_serial_ports,
             connect_motor,
             disconnect_motor,
+            get_motor_port,
             get_motor_state,
-            set_motor_feedback,
             get_motor_config,
             refresh_motor_config,
-            get_motor_port,
             config_motor_position_pid,
             config_motor_speed_pi,
             config_motor_current_pi,
             config_motor_encoder,
-            motor_calibration,
-            is_motor_config_unsaved,
-            save_motor_config,
             config_motor_id,
-            config_motor_udc,
-            config_motor_idq_filter,
+            motor_calibration,
             motor_stop,
             motor_set_speed,
-            motor_set_position
+            motor_set_position,
+            motor_set_current,
+            motor_clear_fault,
+            send_serial_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

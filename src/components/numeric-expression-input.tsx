@@ -20,7 +20,8 @@ export function NumericExpressionInput({
   onEnter?: (v: number) => void;
   min?: number;
   max?: number;
-} & React.HTMLAttributes<HTMLInputElement>) {
+  className?: string;
+} & React.InputHTMLAttributes<HTMLInputElement>) {
   const [raw, setRaw] = useState(value.toString());
 
   // 外部 value 变化时，同步 raw，但不覆盖用户正在输入的内容

@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/select.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Plug, Unplug } from "lucide-react";
-import { MotorConfig } from "@/motor.ts";
+import { motorConfigSchema, type MotorState } from "@/motor.ts";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import { toast } from "sonner";
 
@@ -43,21 +43,28 @@ export default function Device({
 
   const getConfigOrDisconnect = useCallback(async () => {
     try {
-      const r: MotorConfig = await invoke("get_motor_config");
-      setMotorConfig(r);
+      const raw = await invoke("get_motor_config");
+      setMotorConfig(motorConfigSchema.parse(raw));
+      const state = await invoke<string>("get_motor_state");
+      setMotorState(state as MotorState);
       setConnected(true);
     } catch (e) {
       toast.error(`get config failed!\n${e}`);
+      setConnected(false);
+      setMotorConfig(undefined);
+      setMotorState("Unknown");
       await disconnect();
       setConnecting(false);
     }
-  }, [setConnected, setMotorConfig]);
+  }, [setConnected, setMotorConfig, setMotorState]);
 
   // Device events and port monitoring
   useEffect(() => {
     const md = listen("motor-disconnected", () => {
       setConnected(false);
       setConnecting(false);
+      setMotorConfig(undefined);
+      setMotorState("Unknown");
       disconnect().then();
     });
     invoke("list_serial_ports").then((ports) => setPortList(ports as string[]));
@@ -68,7 +75,7 @@ export default function Device({
       md.then((un) => un());
       spc.then((un) => un());
     };
-  }, [setConnected]);
+  }, [setConnected, setMotorConfig, setMotorState]);
 
   // Clear selected port if it disappears from port list
   useEffect(() => {
@@ -82,29 +89,38 @@ export default function Device({
   useEffect(() => {
     if (reconnectedRef.current) return;
     reconnectedRef.current = true;
-    invoke("get_motor_port").then((port) => {
-      if (!port) return;
-      setSelected(port as string);
-      setConnecting(true);
-      getConfigOrDisconnect().then(() => {
-        setConnecting(false);
-        setConnected(true);
+    invoke("get_motor_port")
+      .then((port) => {
+        if (!port) return;
+        setSelected(port as string);
+        setConnecting(true);
+        getConfigOrDisconnect().then(() => {
+          setConnecting(false);
+        });
+      })
+      .catch(() => {
+        // 未连接时后端会 reject；启动阶段静默忽略
       });
-    });
-  }, [getConfigOrDisconnect, setConnected]);
+  }, [getConfigOrDisconnect]);
 
   const connect = useCallback(async () => {
     setConnecting(true);
     try {
-      await invoke("connect_motor", { portName: selected, baudRate: 115200 });
+      await invoke("connect_motor", { portName: selected, baudRate: 460800 });
       await getConfigOrDisconnect();
-      setMotorState("Stop");
     } catch (e) {
       console.error(e);
       toast.error(`connect error!\n${e}`);
     }
     setConnecting(false);
-  }, [getConfigOrDisconnect, selected, setMotorState]);
+  }, [getConfigOrDisconnect, selected]);
+
+  const clearAndDisconnect = useCallback(async () => {
+    setConnected(false);
+    setMotorConfig(undefined);
+    setMotorState("Unknown");
+    await disconnect();
+  }, [setConnected, setMotorConfig, setMotorState]);
 
   return (
     <div
@@ -119,7 +135,7 @@ export default function Device({
           className="border-0 rounded-none border-r"
           variant="outline"
           size="icon"
-          onClick={() => disconnect()}
+          onClick={() => void clearAndDisconnect()}
         >
           <Unplug />
         </Button>

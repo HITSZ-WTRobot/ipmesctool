@@ -1,16 +1,8 @@
 import { atom } from "jotai";
-import { MotorConfig } from "@/motor.ts";
+import type { MotorConfig, MotorState } from "@/motor.ts";
 
 export const motorConnectedAtom = atom<boolean>(false);
 
-export type MotorState = "Stop" | "DebugRun" | "Run" | "Test" | "Fault";
+export const motorStateAtom = atom<MotorState>("Unknown");
 
-export type MotorDebugRunState = "Stop" | "Position" | "Speed";
-
-export const motorStateAtom = atom<MotorState>("Stop");
-
-export const motorDebugRunStateAtom = atom<MotorDebugRunState>("Stop");
-
-export const motorConfigAtom = atom<MotorConfig>();
-
-export const motorConfigUnsavedAtom = atom<boolean>(false);
+export const motorConfigAtom = atom<MotorConfig | undefined>(undefined);

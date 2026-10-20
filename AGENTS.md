@@ -11,8 +11,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `bun run lint` | ESLint on `src/**/*.{ts,tsx,js,jsx}` |
 | `bun run tauri dev` | Full Tauri dev mode (Rust build + Vite + native window) |
 | `bun run tauri build` | Tauri production build |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | Run Rust protocol regression tests |
 
-Package manager is **bun** (not npm/yarn/pnpm). There is no test suite.
+Package manager is **bun** (not npm/yarn/pnpm). Rust protocol regression tests cover configuration parsing, calibration reports, state/parameter boundaries, and command acknowledgements; there is no frontend test suite.
 
 ## 工作流程
 
@@ -26,9 +27,9 @@ Package manager is **bun** (not npm/yarn/pnpm). There is no test suite.
 ### Two-process architecture
 
 - **Rust backend** (`src-tauri/`) — serial communication, command parsing, motor state machine. Runs on tokio async runtime.
-- **React frontend** (`src/`) — UI for PID configuration, encoder setup, calibration, waveform charts, serial console.
+- **React frontend** (`src/`) — UI for PID configuration, encoder setup, calibration, control commands, and the serial console.
 
-The frontend calls Rust via Tauri's `invoke()` mechanism. Each `#[tauri::command]` in `src-tauri/src/invokes.rs` maps to one frontend `invoke()` call. Rust pushes real-time data to the frontend via Tauri's event emitter (`app.emit()`), which the frontend listens to with `listen()` from `@tauri-apps/api/event`.
+The frontend calls Rust via Tauri's `invoke()` mechanism. Each `#[tauri::command]` in `src-tauri/src/invokes.rs` maps to a frontend `invoke()` call. Rust pushes serial lines, motor state changes, and calibration progress via Tauri's event emitter (`app.emit()`); the frontend subscribes with `listen()` from `@tauri-apps/api/event`.
 
 ### Rust backend structure (`src-tauri/src/`)
 
@@ -37,46 +38,52 @@ The frontend calls Rust via Tauri's `invoke()` mechanism. Each `#[tauri::command
 | `main.rs` | Entry point, calls `lib::run()` |
 | `lib.rs` | Tauri builder setup: registers plugins, initializes `AppState`, starts serial port monitor, registers all invoke handlers |
 | `invokes.rs` | All `#[tauri::command]` handlers — the API surface between frontend and backend. Manages `AppState` (global motor + app handle) |
-| `serial.rs` | `SerialDevice` — tokio-serial wrapper. Opens port, runs a read loop that splits incoming data on `\r\n` and broadcasts lines via `tokio::sync::broadcast` |
-| `motor.rs` | `Motor` — wraps `SerialDevice`, manages state machine (`Stop`/`DebugRun`/`Run`/`Test`/`Fault`), parses feedback data, emits typed events |
+| `serial.rs` | `SerialDevice` — tokio-serial wrapper. Opens the port, splits received lines on LF (including firmware CRLF), and broadcasts lines via `tokio::sync::broadcast` |
+| `motor.rs` | `Motor` — serializes command/reply transactions, maintains firmware state/configuration, and emits raw console and calibration events |
 | `command.rs` | Command enums (`MotorRunCommand`, `MotorConfigCommand`, `MotorCalibrationCommand`) — each serial command knows what motor states it's valid in |
-| `config_parser.rs` | `ConfigParser` — incremental line-by-line parser that builds a `MotorConfig` struct from `get_config` serial output |
-| `calibration_parser.rs` | `CalibrationParser` — state-machine parser for the multi-step calibration procedure |
+| `config_parser.rs` | `ConfigParser` — parses GPMD_Code's seven space-separated configuration rows and their `key=value` fields |
+| `calibration_parser.rs` | `CalibrationParser` — tracks separator-delimited asynchronous calibration reports and preserves results/failure stages |
 | `error.rs` | `MotorError` enum (uses `thiserror`) |
 | `exit_signal.rs` | `ExitSignal` — a `tokio::sync::watch`-based signal for cleanly stopping async loops |
 
 **Key backend patterns:**
-- The serial read loop broadcasts every `\r\n`-delimited line to all subscribers via `broadcast::channel`.
-- `Motor::parse_feedback_loop` subscribes to these lines, checks the current `MotorFeedbackState`, and parses/emits typed feedback events (`motor_feedback_update`).
-- Config commands are only allowed in `MotorState::Stop`. Run commands (`set_speed`, `set_position`) are allowed in `Stop` or `DebugRun`.
-- The `unsaved` flag (`AtomicBool`) tracks whether config changes have been written to flash — shown as a red warning in the footer.
+- Firmware reference: GPMD_Code `APP/uart_com.cpp`. Commands are CRLF-terminated; synchronous replies end with `ok` or `error <reason>`.
+- Every request uses the same request lock and subscribes before sending. An `ok` is required before reporting command success; firmware errors are propagated. Timeout or broadcast lag closes the port to prevent a late acknowledgement from being assigned to a later command.
+- Firmware states are `Initialization`, `Calibration`, `CurrentControl`, `SpeedControl`, `PositionControl`, `Ready`, and `Fault`; `Unknown` is never assumed runnable. Configuration and calibration require `Ready`; control/stop allow `Ready` and the three control modes; `clear_fault` requires `Fault`.
+- `get_config` reads `state`, uint32 `id`, `motor` (`rs`, `ld`, `lq`), `current_pi`, `speed_pi`, `position_pid`, and `encoder`, then waits for the final acknowledgement. Missing or malformed configuration is an error, not a partial success.
+- Configuration setters persist to Flash themselves; there is no `save` command or unsaved flag. `config_id` writes only 0–2047 (the firmware's standard FDCAN ID limit), although the wire field is uint32. `config_current_pi <kp> <ki>` writes the same gains to d/q, although readback may contain different d/q gains after calibration.
+- Speed commands use mechanical rpm, position commands use accumulated mechanical degrees, and current commands use q-axis amperes. UI rad/s and radians are converted before invoking the backend.
+- Encoder writes accept pole pairs 1–255, direction `CW`/`CCW`, offset in electrical radians, and `AS5600`, `MT6701_IIC`, `MT6701_SPI`, or `AS5047P`. Unconfigured `None`/`Unknown` readback is displayed but cannot be written.
+- Calibration's initial `ok` only acknowledges startup. Its asynchronous `calibration_status`/`stage`/`result`/`failed_stage` blocks finish at the closing separator of a success/failure report. Failures preserve the reported motor state; successful calibration requests automatic saving in the firmware main loop (there is no separate Flash acknowledgement).
+- UART has no live telemetry, bus-voltage/filter setters, or motor-electrical-parameter setters. The old waveform/feedback and manual-save paths are removed, not emulated. The raw console sends one command per request and uses the same acknowledgement/state rules.
 
 ### Frontend structure (`src/`)
 
 | Directory | Purpose |
 |-----------|---------|
-| `pages/` | 6 pages: device-info, pid-config, encoder-config, calibration, chart (waveform), serial-console. Lazy-loaded via `React.lazy()` |
-| `components/` | App shell (sidebar, device connector, motor state indicator, debug console) + shadcn/ui primitives under `ui/` |
+| `pages/` | 5 pages: device-info, pid-config, encoder-config, calibration, serial-console. Lazy-loaded via `React.lazy()` |
+| `components/` | App shell (sidebar, device connector, motor state indicator, control console) + shadcn/ui primitives under `ui/` |
 | `stores/` | Jotai atoms for global state |
 | `lib/` | `cn()` utility, unit conversion helpers (rad/deg, rpm/rps) |
 | `motor.ts` | Zod schemas mirroring Rust's `MotorConfig` struct |
 
 **Key frontend patterns:**
-- **State management**: Jotai atoms. `pageAtom` drives which page is visible. Pages are *persistent* — they render once and stay mounted, hidden via `display: none`. This preserves chart data and input state across page switches.
+- **State management**: Jotai atoms. `pageAtom` drives which page is visible. Pages are *persistent* — they render once and stay mounted, hidden via `display: none`. This preserves editing state across page switches; device disconnection clears configuration/state and PID drafts.
 - **UI framework**: shadcn/ui (new-york style) with Tailwind CSS v4. Component aliases use `@/` prefix mapped to `src/`.
-- **Feedback buffer** (`stores/feedback.ts`): Real-time sensor data (speed, position, current, Udc) is stored in plain arrays outside Jotai (`motorFeedbackBuffer`). Only UI control state (which type is selected, pause toggle, time window) lives in atoms. This avoids re-rendering on every high-frequency data point.
+- **Protocol data**: `motorConfigSchema` validates configuration at the frontend boundary. Global atoms hold configuration/connection/state; `serial-sent`, `serial-received`, `motor-state-change`, `motor-disconnected`, and `calibration-state` update the relevant UI. No UART waveform buffer exists.
 - **Dark mode**: `next-themes` provider, defaults to dark.
 
 ### Data flow
 
 ```
-Hardware → Serial port → SerialDevice::read_loop → broadcast channel
-  → Motor::parse_feedback_loop → Tauri emit("motor_feedback_update") 
-  → React listen() → push to motorFeedbackBuffer → uPlot/PixiJS charts
+Hardware → SerialDevice::read_loop → broadcast channel
+  → Motor command/reply transaction → confirmed configuration/state
+  → Tauri serial/state/calibration events → React listeners and Jotai/UI
 ```
 
 For commands (config changes, run commands), the flow reverses:
 ```
-React → invoke("config_motor_position_pid", {...}) 
-  → Rust #[tauri::command] → Motor::send_config_command → SerialDevice::send → Hardware
+React → invoke("config_motor_position_pid", {...})
+  → Rust handler → serialized Motor transaction → SerialDevice::send → Hardware
+  → ok/error → get_config readback → confirmed cache or surfaced error
 ```

@@ -8,14 +8,18 @@ pub enum MotorError {
     ParseError(String),
     #[error("invalid state: {0}")]
     InvalidState(String),
-    #[error("calibration error: {0}")]
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
+    /// 固件显式回包 `error <reason>`，reason 原样保留。
+    #[error("firmware error: {0}")]
+    FirmwareError(String),
+    /// 固件已接受命令（收到 `ok`），但随后读回确认配置失败。
+    #[error("command accepted but config refresh failed: {0}")]
+    ConfigRefreshFailed(String),
+    #[error("calibration failed: {0}")]
     CalibrationError(String),
-    #[error("fault detected: {0}")]
-    FaultDetected(String),
     #[error("timeout")]
     Timeout,
-    #[error("emit event error: {0}")]
-    TauriEmitError(tauri::Error),
     #[error("disconnected")]
     Disconnected,
 }

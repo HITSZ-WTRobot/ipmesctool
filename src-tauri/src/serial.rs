@@ -38,7 +38,8 @@ impl SerialDevice {
 
     pub async fn connect(self: &Arc<Self>) -> Result<(), String> {
         let stream = tokio_serial::new(&self.port_name, self.baud_rate)
-            .open_native_async().map_err(|e| e.to_string())?;
+            .open_native_async()
+            .map_err(|e| e.to_string())?;
         let (reader, writer) = tokio::io::split(stream);
         *self.reader.lock().await = Some(reader);
         *self.writer.lock().await = Some(writer);
@@ -77,10 +78,10 @@ impl SerialDevice {
                         }
                     };
                     cache.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    // 分行（包含 get_speed、get_current、get_config 等所有返回）
-                    while let Some(pos) = cache.find("\r\n") {
+                    // 固件严格以 CRLF 结束每行；按 LF 分行并去掉行尾 CR 更宽容。
+                    while let Some(pos) = cache.find('\n') {
                         let line = cache[..pos].trim().to_string();
-                        cache.drain(..pos + 2);
+                        cache.drain(..pos + 1);
 
                         if !line.is_empty() {
                             // 广播给所有订阅者
@@ -95,12 +96,14 @@ impl SerialDevice {
         }
     }
 
+    /// 逐字写入（调用方负责包含 CRLF）；由上层请求锁保证请求串行。
     pub async fn send(&self, text: &str) -> Result<(), String> {
         let mut writer = self.writer.lock().await;
         debug!("serial send: {text}");
 
         if let Some(ref mut writer) = *writer {
-            writer.write_all(text.as_bytes())
+            writer
+                .write_all(text.as_bytes())
                 .await
                 .map_err(|e| e.to_string())
         } else {

@@ -1,220 +1,467 @@
-use scan_fmt::scan_fmt;
+use crate::command::MotorState;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use strum_macros::{Display, EnumString};
 
-#[derive(Debug, Default)]
-struct PositionPID {
-    kp: Option<f32>,
-    ki: Option<f32>,
-    kd: Option<f32>,
-    maxoutput: Option<f32>,
+/// 固件 `get_config` 输出的三行电机电气参数（单位：Ohm / H）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MotorElectricalConfig {
+    pub rs: f32,
+    pub ld: f32,
+    pub lq: f32,
 }
 
-#[derive(Debug, Default)]
-struct SpeedPI {
-    kp: Option<f32>,
-    ki: Option<f32>,
-    maxoutput: Option<f32>,
-}
-
-#[derive(Debug, Default)]
-struct IDQPI {
-    id_kp: Option<f32>,
-    id_ki: Option<f32>,
-    iq_kp: Option<f32>,
-    iq_ki: Option<f32>,
-}
-
-#[derive(Debug, Default)]
-struct Encoder {
-    pole_pairs: Option<u32>,
-    encoder_direct: Option<i32>,
-    encoder_offset: Option<f32>,
-    encoder_type: Option<String>,
-}
-
+/// 解析固件 `get_config` 的 7 行数据输出。
+///
+/// 固件格式（每行 CRLF，浮点为 `%.7g` 可变位数）：
+/// ```text
+/// state Ready
+/// id 1
+/// motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778
+/// current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275
+/// speed_pi kp=0.03703183 ki=0.8226405 outputmax=2
+/// position_pid kp=3 ki=3 kd=0 outputmax=2000
+/// encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI
+/// ok
+/// ```
+/// `ok` / `error ...` 等应答由后端处理；本解析器忽略无关行，
+/// 但对可识别的配置行若字段缺失或无法解析会返回错误。
 #[derive(Debug, Default)]
 pub struct ConfigParser {
-    id: Option<u8>,
-    udc: Option<f32>,
-    position_pid: PositionPID,
-    speed_pi: SpeedPI,
-    idq_filter_fc: Option<f32>,
-    i_pi: IDQPI,
-    encoder: Encoder,
+    state: Option<MotorState>,
+    id: Option<u32>,
+    motor: Option<MotorElectricalConfig>,
+    /// d_kp, d_ki, q_kp, q_ki
+    current_pi: Option<[f32; 4]>,
+    speed_pi: Option<SpeedPIConfig>,
+    position_pid: Option<PositionPIDConfig>,
+    encoder: Option<EncoderConfig>,
 }
 
 impl ConfigParser {
-    /// 解析一行并更新自己
-    pub fn parse_line(&mut self, line: &str, section: &mut String) {
-        let line_string = line.trim().replace(": ", ":");
-        let line = line_string.as_str();
-
-        // 判断 section 切换和顶层字段
-        match line {
-            "position_pid:" => {
-                *section = "position_pid".to_string();
-                return;
-            }
-            "speed_pi:" => {
-                *section = "speed_pi".to_string();
-                return;
-            }
-            "i_pi:" => {
-                *section = "i_pi".to_string();
-                return;
-            }
-            "encoder:" => {
-                *section = "encoder".to_string();
-                return;
-            }
-            _ => {
-                if let Ok(v) = scan_fmt!(line, "id:{}", u8) {
-                    self.id = Some(v);
-                    return;
-                }
-                if let Ok(v) = scan_fmt!(line, "udc:{}", f32) {
-                    self.udc = Some(v);
-                    return;
-                }
-                if let Ok(v) = scan_fmt!(line, "idq_filter_fc:{}", f32) {
-                    self.idq_filter_fc = Some(v);
-                    return;
-                }
-            }
+    /// 解析一行并更新自身。无法识别的行被忽略；可识别但格式非法的行返回错误。
+    pub fn parse_line(&mut self, line: &str) -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
         }
-
-        // 按 section 解析
-        match section.as_str() {
-            "position_pid" => {
-                if let Ok(kp) = scan_fmt!(line, "Kp:{}", f32) { self.position_pid.kp = Some(kp); }
-                if let Ok(ki) = scan_fmt!(line, "Ki:{}", f32) { self.position_pid.ki = Some(ki); }
-                if let Ok(kd) = scan_fmt!(line, "Kd:{}", f32) { self.position_pid.kd = Some(kd); }
-                if let Ok(max) = scan_fmt!(line, "maxoutput:{}", f32) { self.position_pid.maxoutput = Some(max); }
+        let (tag, rest) = match line.split_once(char::is_whitespace) {
+            Some((tag, rest)) => (tag, rest.trim()),
+            None => (line, ""),
+        };
+        match tag {
+            "state" => {
+                let name = single_token(rest, "state")?;
+                let state = MotorState::from_str(name)
+                    .map_err(|_| format!("state: unknown motor state `{name}`"))?;
+                self.state = Some(state);
+            }
+            "id" => {
+                let value = single_token(rest, "id")?;
+                self.id = Some(parse_u32(value, "id")?);
+            }
+            "motor" => {
+                let pairs = kv_pairs(rest)?;
+                self.motor = Some(MotorElectricalConfig {
+                    rs: parse_float(kv(&pairs, "rs", "motor")?, "motor.rs")?,
+                    ld: parse_float(kv(&pairs, "ld", "motor")?, "motor.ld")?,
+                    lq: parse_float(kv(&pairs, "lq", "motor")?, "motor.lq")?,
+                });
+            }
+            "current_pi" => {
+                let pairs = kv_pairs(rest)?;
+                self.current_pi = Some([
+                    parse_float(kv(&pairs, "d_kp", "current_pi")?, "current_pi.d_kp")?,
+                    parse_float(kv(&pairs, "d_ki", "current_pi")?, "current_pi.d_ki")?,
+                    parse_float(kv(&pairs, "q_kp", "current_pi")?, "current_pi.q_kp")?,
+                    parse_float(kv(&pairs, "q_ki", "current_pi")?, "current_pi.q_ki")?,
+                ]);
             }
             "speed_pi" => {
-                if let Ok(kp) = scan_fmt!(line, "Kp:{}", f32) { self.speed_pi.kp = Some(kp); }
-                if let Ok(ki) = scan_fmt!(line, "Ki:{}", f32) { self.speed_pi.ki = Some(ki); }
-                if let Ok(max) = scan_fmt!(line, "maxoutput:{}", f32) { self.speed_pi.maxoutput = Some(max); }
+                let pairs = kv_pairs(rest)?;
+                self.speed_pi = Some(SpeedPIConfig {
+                    kp: parse_float(kv(&pairs, "kp", "speed_pi")?, "speed_pi.kp")?,
+                    ki: parse_float(kv(&pairs, "ki", "speed_pi")?, "speed_pi.ki")?,
+                    output_max: parse_float(
+                        kv(&pairs, "outputmax", "speed_pi")?,
+                        "speed_pi.outputmax",
+                    )?,
+                });
             }
-            "i_pi" => {
-                if let Ok(v) = scan_fmt!(line, "id_Kp:{}", f32) { self.i_pi.id_kp = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "id_Ki:{}", f32) { self.i_pi.id_ki = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "iq_Kp:{}", f32) { self.i_pi.iq_kp = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "iq_Ki:{}", f32) { self.i_pi.iq_ki = Some(v); }
+            "position_pid" => {
+                let pairs = kv_pairs(rest)?;
+                self.position_pid = Some(PositionPIDConfig {
+                    kp: parse_float(kv(&pairs, "kp", "position_pid")?, "position_pid.kp")?,
+                    ki: parse_float(kv(&pairs, "ki", "position_pid")?, "position_pid.ki")?,
+                    kd: parse_float(kv(&pairs, "kd", "position_pid")?, "position_pid.kd")?,
+                    output_max: parse_float(
+                        kv(&pairs, "outputmax", "position_pid")?,
+                        "position_pid.outputmax",
+                    )?,
+                });
             }
             "encoder" => {
-                if let Ok(v) = scan_fmt!(line, "pole_pairs:{}", u32) { self.encoder.pole_pairs = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_direct:{}", i32) { self.encoder.encoder_direct = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_offset:{}", f32) { self.encoder.encoder_offset = Some(v); }
-                if let Ok(v) = scan_fmt!(line, "encoder_type:{}", String) { self.encoder.encoder_type = Some(v); }
+                let pairs = kv_pairs(rest)?;
+                let pole_pairs =
+                    parse_u32(kv(&pairs, "pole_pairs", "encoder")?, "encoder.pole_pairs")?;
+                let direction_text = kv(&pairs, "direction", "encoder")?;
+                let encoder_direction =
+                    EncoderDirection::from_str(direction_text).map_err(|_| {
+                        format!("encoder.direction: invalid direction `{direction_text}`")
+                    })?;
+                let encoder_offset =
+                    parse_float(kv(&pairs, "offset", "encoder")?, "encoder.offset")?;
+                let type_text = kv(&pairs, "type", "encoder")?;
+                let encoder_type = EncoderType::from_str(type_text)
+                    .map_err(|_| format!("encoder.type: invalid encoder type `{type_text}`"))?;
+                self.encoder = Some(EncoderConfig {
+                    pole_pairs,
+                    encoder_direction,
+                    encoder_offset,
+                    encoder_type,
+                });
             }
+            // `ok`、`error ...`、校准行等与配置读取无关的行一律忽略。
             _ => {}
         }
+        Ok(())
     }
-    pub fn is_complete(&self) -> bool {
-        macro_rules! all_some {
-            ($($field:expr),+ $(,)?) => { true $(&& $field.is_some())+ };
+
+    /// 将已解析的全部 7 行转换为 `MotorConfig`；缺少字段时返回列出所有缺失字段的错误。
+    pub fn try_into_motor_config(&self) -> Result<MotorConfig, String> {
+        let mut missing: Vec<&str> = Vec::new();
+        if self.state.is_none() {
+            missing.push("state");
         }
-        all_some!(
-            self.id, self.udc, self.idq_filter_fc,
-            self.position_pid.kp, self.position_pid.ki, self.position_pid.kd, self.position_pid.maxoutput,
-            self.speed_pi.kp, self.speed_pi.ki, self.speed_pi.maxoutput,
-            self.i_pi.id_kp, self.i_pi.id_ki, self.i_pi.iq_kp, self.i_pi.iq_ki,
-            self.encoder.pole_pairs, self.encoder.encoder_direct, self.encoder.encoder_offset, self.encoder.encoder_type,
-        )
-    }
+        if self.id.is_none() {
+            missing.push("id");
+        }
+        if self.motor.is_none() {
+            missing.push("motor");
+        }
+        if self.current_pi.is_none() {
+            missing.push("current_pi");
+        }
+        if self.speed_pi.is_none() {
+            missing.push("speed_pi");
+        }
+        if self.position_pid.is_none() {
+            missing.push("position_pid");
+        }
+        if self.encoder.is_none() {
+            missing.push("encoder");
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "incomplete motor config, missing: {}",
+                missing.join(", ")
+            ));
+        }
 
-    pub fn try_into_motor_config(&self) -> Result<MotorConfig, &'static str> {
-        let id = self.id.ok_or("id missing")?;
-        let udc = self.udc.ok_or("udc missing")?;
-        let fc = self.idq_filter_fc.ok_or("idq_filter_fc missing")?;
-
-        let position_pid = PositionPIDConfig {
-            kp: self.position_pid.kp.ok_or("position_pid.kp missing")?,
-            ki: self.position_pid.ki.ok_or("position_pid.ki missing")?,
-            kd: self.position_pid.kd.ok_or("position_pid.kd missing")?,
-            output_max: self.position_pid.maxoutput.ok_or("position_pid.maxoutput missing")?,
-        };
-        let speed_pi = SpeedPIConfig {
-            kp: self.speed_pi.kp.ok_or("speed_pi.kp missing")?,
-            ki: self.speed_pi.ki.ok_or("speed_pi.ki missing")?,
-            output_max: self.speed_pi.maxoutput.ok_or("speed_pi.maxoutput missing")?,
-        };
-        let current_id_pi = CurrentPIConfig {
-            kp: self.i_pi.id_kp.ok_or("i_pi.id_kp missing")?,
-            ki: self.i_pi.id_ki.ok_or("i_pi.id_ki missing")?,
-        };
-        let current_iq_pi = CurrentPIConfig {
-            kp: self.i_pi.iq_kp.ok_or("i_pi.iq_kp missing")?,
-            ki: self.i_pi.iq_ki.ok_or("i_pi.iq_ki missing")?,
-        };
-
-        let encoder_type_str = self.encoder.encoder_type.as_ref().ok_or("encoder.encoder_type missing")?;
-        let encoder_type = encoder_type_str.parse::<EncoderType>().map_err(|_| "invalid encoder_type")?;
-        let encoder_direction = match self.encoder.encoder_direct.ok_or("encoder.encoder_direct missing")? {
-            1 => EncoderDirection::Same,
-            -1 => EncoderDirection::Reverse,
-            _ => return Err("invalid encoder_direct"),
-        };
-        let encoder_config = EncoderConfig {
-            pole_pairs: self.encoder.pole_pairs.ok_or("encoder.pole_pairs missing")?,
-            encoder_direction,
-            encoder_offset: self.encoder.encoder_offset.ok_or("encoder.encoder_offset missing")?,
-            encoder_type,
-        };
-
-        Ok(MotorConfig { id, udc, position_pid, speed_pi, current_id_pi, current_iq_pi, fc, encoder_config })
+        let current_pi = self.current_pi.expect("checked above");
+        Ok(MotorConfig {
+            state: self.state.expect("checked above"),
+            id: self.id.expect("checked above"),
+            motor: self.motor.clone().expect("checked above"),
+            position_pid: self.position_pid.clone().expect("checked above"),
+            speed_pi: self.speed_pi.clone().expect("checked above"),
+            current_id_pi: CurrentPIConfig {
+                kp: current_pi[0],
+                ki: current_pi[1],
+            },
+            current_iq_pi: CurrentPIConfig {
+                kp: current_pi[2],
+                ki: current_pi[3],
+            },
+            encoder_config: self.encoder.clone().expect("checked above"),
+        })
     }
 }
 
+fn single_token<'a>(rest: &'a str, row: &str) -> Result<&'a str, String> {
+    let mut tokens = rest.split_whitespace();
+    let token = tokens
+        .next()
+        .ok_or_else(|| format!("{row}: missing value"))?;
+    if tokens.next().is_some() {
+        return Err(format!("{row}: expected exactly one value, got `{rest}`"));
+    }
+    Ok(token)
+}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn parse_float(value: &str, field: &str) -> Result<f32, String> {
+    match value.parse::<f32>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        Ok(_) => Err(format!("{field}: value must be finite, got `{value}`")),
+        Err(_) => Err(format!("{field}: invalid float `{value}`")),
+    }
+}
+
+fn parse_u32(value: &str, field: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("{field}: invalid unsigned integer `{value}`"))
+}
+
+fn kv_pairs(rest: &str) -> Result<Vec<(&str, &str)>, String> {
+    if rest.is_empty() {
+        return Err("empty config row payload".to_string());
+    }
+    rest.split_whitespace()
+        .map(|token| {
+            token
+                .split_once('=')
+                .filter(|(key, _)| !key.is_empty())
+                .ok_or_else(|| format!("malformed key=value token `{token}`"))
+        })
+        .collect()
+}
+
+fn kv<'a>(pairs: &[(&'a str, &'a str)], key: &str, row: &str) -> Result<&'a str, String> {
+    let mut found: Option<&str> = None;
+    for (k, v) in pairs {
+        if *k == key {
+            if found.is_some() {
+                return Err(format!("{row}: duplicate field `{key}`"));
+            }
+            found = Some(*v);
+        }
+    }
+    found.ok_or_else(|| format!("{row}: missing field `{key}`"))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionPIDConfig {
     pub kp: f32,
     pub ki: f32,
     pub kd: f32,
     pub output_max: f32,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedPIConfig {
     pub kp: f32,
     pub ki: f32,
     pub output_max: f32,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CurrentPIConfig {
     pub kp: f32,
     pub ki: f32,
 }
 
-#[repr(i8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 固件内部方向符号的正负映射；字符串与固件输出一致。
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, Display, Serialize, Deserialize)]
 pub enum EncoderDirection {
-    Same = 1i8,
-    Reverse = -1i8,
-}
-#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumString, Display, Serialize, Deserialize)]
-pub enum EncoderType {
-    #[strum(serialize = "MT6701")]
-    MT6701,
+    CW,
+    CCW,
+    None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl EncoderDirection {
+    /// `None` 仅用于读回未配置状态，不允许写入固件。
+    pub fn is_writable(&self) -> bool {
+        !matches!(self, EncoderDirection::None)
+    }
+}
+
+/// 固件支持的编码器类型。
+///
+/// `EnumString`/`Display` 使用固件 CLI 字符串（`MT6701_IIC`/`MT6701_SPI`），
+/// serde 序列化同样使用该字符串以匹配前端。
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, Display, Serialize, Deserialize)]
+pub enum EncoderType {
+    AS5600,
+    #[strum(serialize = "MT6701_IIC")]
+    #[serde(rename = "MT6701_IIC")]
+    MT6701IIC,
+    #[strum(serialize = "MT6701_SPI")]
+    #[serde(rename = "MT6701_SPI")]
+    MT6701SPI,
+    AS5047P,
+    None,
+    Unknown,
+}
+
+impl EncoderType {
+    /// `None`/`Unknown` 仅用于读回，不允许写入固件。
+    pub fn is_writable(&self) -> bool {
+        !matches!(self, EncoderType::None | EncoderType::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EncoderConfig {
     pub pole_pairs: u32,
     pub encoder_direction: EncoderDirection,
     pub encoder_offset: f32,
     pub encoder_type: EncoderType,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MotorConfig {
-    pub id: u8,
-    pub udc: f32,
+    pub state: MotorState,
+    pub id: u32,
+    pub motor: MotorElectricalConfig,
     pub position_pid: PositionPIDConfig,
     pub speed_pi: SpeedPIConfig,
     pub current_id_pi: CurrentPIConfig,
     pub current_iq_pi: CurrentPIConfig,
-    pub fc: f32,
     pub encoder_config: EncoderConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 用户提供的固件 `get_config` 完整样本。
+    const SAMPLE: &[&str] = &[
+        "state Ready",
+        "id 1",
+        "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778",
+        "current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275",
+        "speed_pi kp=0.03703183 ki=0.8226405 outputmax=2",
+        "position_pid kp=3 ki=3 kd=0 outputmax=2000",
+        "encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI",
+        "ok",
+    ];
+
+    fn parse_sample() -> ConfigParser {
+        let mut parser = ConfigParser::default();
+        for line in SAMPLE {
+            parser.parse_line(line).expect("sample line must parse");
+        }
+        parser
+    }
+
+    #[test]
+    fn parses_full_sample_exactly() {
+        let config = parse_sample()
+            .try_into_motor_config()
+            .expect("complete sample");
+
+        assert_eq!(config.state, MotorState::Ready);
+        assert_eq!(config.id, 1);
+        assert!((config.motor.rs - 0.1867275).abs() < 1e-9);
+        assert!((config.motor.ld - 0.0004650604).abs() < 1e-12);
+        assert!((config.motor.lq - 0.0002910778).abs() < 1e-12);
+        assert!((config.current_id_pi.kp - 0.4650604).abs() < 1e-9);
+        assert!((config.current_id_pi.ki - 186.7275).abs() < 1e-4);
+        assert!((config.current_iq_pi.kp - 0.2910778).abs() < 1e-9);
+        assert!((config.current_iq_pi.ki - 186.7275).abs() < 1e-4);
+        assert!((config.speed_pi.kp - 0.03703183).abs() < 1e-10);
+        assert!((config.speed_pi.ki - 0.8226405).abs() < 1e-9);
+        assert!((config.speed_pi.output_max - 2.0).abs() < 1e-9);
+        assert!((config.position_pid.kp - 3.0).abs() < 1e-9);
+        assert!((config.position_pid.ki - 3.0).abs() < 1e-9);
+        assert_eq!(config.position_pid.kd, 0.0);
+        assert!((config.position_pid.output_max - 2000.0).abs() < 1e-9);
+        assert_eq!(config.encoder_config.pole_pairs, 7);
+        assert_eq!(
+            config.encoder_config.encoder_direction,
+            EncoderDirection::CCW
+        );
+        assert!((config.encoder_config.encoder_offset - 1.6083).abs() < 1e-9);
+        assert_eq!(config.encoder_config.encoder_type, EncoderType::MT6701SPI);
+    }
+
+    #[test]
+    fn accepts_full_width_uint32_id_and_scientific_floats() {
+        let mut parser = ConfigParser::default();
+        for line in SAMPLE {
+            let substituted = match *line {
+                "id 1" => "id 4294967295",
+                "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778" => {
+                    "motor rs=1.867275e-1 ld=4.650604e-4 lq=2.910778e-4"
+                }
+                other => other,
+            };
+            parser.parse_line(substituted).unwrap();
+        }
+        let config = parser.try_into_motor_config().unwrap();
+        assert_eq!(config.id, u32::MAX);
+        assert!((config.motor.rs - 0.1867275).abs() < 1e-9);
+        assert!((config.motor.ld - 0.0004650604).abs() < 1e-12);
+    }
+
+    #[test]
+    fn readback_allows_zero_pole_pairs_and_placeholder_encoder() {
+        let mut parser = ConfigParser::default();
+        for line in SAMPLE {
+            let substituted = match *line {
+                "encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI" => {
+                    "encoder pole_pairs=0 direction=None offset=0 type=None"
+                }
+                other => other,
+            };
+            parser.parse_line(substituted).unwrap();
+        }
+        let config = parser.try_into_motor_config().unwrap();
+        assert_eq!(config.encoder_config.pole_pairs, 0);
+        assert_eq!(
+            config.encoder_config.encoder_direction,
+            EncoderDirection::None
+        );
+        assert_eq!(config.encoder_config.encoder_type, EncoderType::None);
+    }
+
+    #[test]
+    fn malformed_recognized_rows_are_rejected() {
+        let mut parser = ConfigParser::default();
+        // 缺少 lq 字段。
+        assert!(parser.parse_line("motor rs=1 ld=2").is_err());
+        // 非有限浮点。
+        assert!(parser
+            .parse_line("encoder pole_pairs=7 direction=CCW offset=inf type=MT6701_SPI")
+            .is_err());
+        assert!(parser
+            .parse_line("speed_pi kp=1 ki=2 outputmax=NaN")
+            .is_err());
+        // 非法方向/类型。
+        assert!(parser
+            .parse_line("encoder pole_pairs=7 direction=sideways offset=0 type=MT6701_SPI")
+            .is_err());
+        assert!(parser
+            .parse_line("encoder pole_pairs=7 direction=CW offset=0 type=MT6702")
+            .is_err());
+        // 非法 uint32 / 状态。
+        assert!(parser.parse_line("id 4294967296").is_err());
+        assert!(parser.parse_line("id -1").is_err());
+        assert!(parser.parse_line("state Running").is_err());
+        // 缺少值的可识别行。
+        assert!(parser.parse_line("state").is_err());
+        assert!(parser.parse_line("current_pi d_kp=1").is_err());
+    }
+
+    #[test]
+    fn unrelated_lines_are_ignored() {
+        let mut parser = ConfigParser::default();
+        assert!(parser.parse_line("ok").is_ok());
+        assert!(parser.parse_line("error state").is_ok());
+        assert!(parser.parse_line("result alignment=ok").is_ok());
+        assert!(parser.parse_line("").is_ok());
+        assert!(parser.try_into_motor_config().is_err());
+    }
+
+    #[test]
+    fn partial_config_reports_all_missing_rows() {
+        let mut parser = ConfigParser::default();
+        parser.parse_line("state Ready").unwrap();
+        parser.parse_line("id 1").unwrap();
+        parser.parse_line("motor rs=1 ld=2 lq=3").unwrap();
+        let err = parser.try_into_motor_config().unwrap_err();
+        for missing in ["current_pi", "speed_pi", "position_pid", "encoder"] {
+            assert!(
+                err.contains(missing),
+                "error `{err}` should mention {missing}"
+            );
+        }
+        assert!(
+            !err.contains("state"),
+            "state present, must not be reported missing"
+        );
+    }
 }

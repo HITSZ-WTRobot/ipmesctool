@@ -1,11 +1,12 @@
-import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
-import {
+import { atom, useAtom, useAtomValue } from "jotai";
+import { ENCODER_DIRECTIONS, ENCODER_TYPES } from "@/motor.ts";
+import type {
   EncoderConfig as EncoderConfigType,
-  EncoderDirection,
-  EncoderType,
+  WritableEncoderDirection,
+  WritableEncoderType,
 } from "@/motor.ts";
-import React, { useCallback, useEffect } from "react";
-import { motorConfigAtom, motorConfigUnsavedAtom } from "@/stores/motor.ts";
+import { useCallback, useEffect } from "react";
+import { motorConfigAtom, motorStateAtom } from "@/stores/motor.ts";
 import {
   Card,
   CardAction,
@@ -37,12 +38,13 @@ const encoderConfigAtom = atom<EncoderConfigType | null>(null);
 export default function EncoderConfig() {
   const [encoderConfig, setEncoderConfig] = useAtom(encoderConfigAtom);
   const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
-  const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
   const useDeg = useAtomValue(useDegAtom);
+  const state = useAtomValue(motorStateAtom);
+  const ready = state === "Ready";
 
   const refresh = useCallback(() => {
     if (!motorConfig) return;
-    // 读取 encoder config，角度保留 10 位小数
+    // 读取 encoder config，角度按当前显示单位换算
     setEncoderConfig({
       ...motorConfig.encoder_config,
       encoder_offset: useDeg
@@ -68,6 +70,48 @@ export default function EncoderConfig() {
     return <div>电机配置未加载</div>;
   }
 
+  const save = async () => {
+    const polePairs = encoderConfig.pole_pairs;
+    if (!Number.isInteger(polePairs) || polePairs < 1 || polePairs > 255) {
+      toast.error("极对数必须为 1..255 的整数");
+      return;
+    }
+    if (
+      encoderConfig.encoder_direction !== "CW" &&
+      encoderConfig.encoder_direction !== "CCW"
+    ) {
+      toast.error("请选择编码器方向 (CW/CCW)");
+      return;
+    }
+    if (!(ENCODER_TYPES as readonly string[]).includes(encoderConfig.encoder_type)) {
+      toast.error("请选择编码器类型");
+      return;
+    }
+    const encoderOffset = useDeg
+      ? deg2rad(encoderConfig.encoder_offset)
+      : encoderConfig.encoder_offset;
+    if (!Number.isFinite(encoderOffset)) {
+      toast.error("偏移量必须为有限数值");
+      return;
+    }
+    try {
+      await invoke("config_motor_encoder", {
+        polePairs,
+        encoderOffset,
+        encoderDirection: encoderConfig.encoder_direction,
+        encoderType: encoderConfig.encoder_type,
+      });
+      setPartValue(setMotorConfig, motorConfig, "encoder_config", {
+        pole_pairs: polePairs,
+        encoder_offset: encoderOffset,
+        encoder_direction: encoderConfig.encoder_direction,
+        encoder_type: encoderConfig.encoder_type,
+      });
+    } catch (e) {
+      toast.error(`保存失败, e: ${e}`);
+    }
+  };
+
   return (
     <div className="w-full p-4 space-y-4">
       <Card>
@@ -80,29 +124,8 @@ export default function EncoderConfig() {
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={async () => {
-                try {
-                  const c = {
-                    polePairs: encoderConfig.pole_pairs,
-                    encoderOffset: useDeg
-                      ? deg2rad(encoderConfig.encoder_offset)
-                      : encoderConfig.encoder_offset,
-                    encoderDirection: encoderConfig.encoder_direction,
-                    encoderType: encoderConfig.encoder_type,
-                  };
-                  await invoke("config_motor_encoder", c);
-                  setPartValue(setMotorConfig, motorConfig, "encoder_config", {
-                    pole_pairs: c.polePairs,
-                    encoder_offset: c.encoderOffset,
-                    encoder_direction: c.encoderDirection,
-                    encoder_type: c.encoderType,
-                  });
-                  setUnsaved(true);
-                } catch (e) {
-                  console.log(e);
-                  toast.error(`保存失败, e: ${e}`);
-                }
-              }}
+              onClick={save}
+              disabled={!ready}
             >
               <Save />
             </Button>
@@ -119,13 +142,15 @@ export default function EncoderConfig() {
               id="PolePairs"
               type="number"
               min={1}
+              max={255}
               value={encoderConfig.pole_pairs}
+              disabled={!ready}
               onChange={(e) =>
                 setPartValue(
                   setEncoderConfig,
                   encoderConfig,
                   "pole_pairs",
-                  Math.floor(e.target.valueAsNumber),
+                  e.target.valueAsNumber,
                 )
               }
             />
@@ -136,12 +161,13 @@ export default function EncoderConfig() {
             </ButtonGroupText>
             <Select
               value={encoderConfig.encoder_direction}
+              disabled={!ready}
               onValueChange={(v) =>
                 setPartValue(
                   setEncoderConfig,
                   encoderConfig,
                   "encoder_direction",
-                  v as EncoderDirection,
+                  v as WritableEncoderDirection,
                 )
               }
             >
@@ -150,10 +176,16 @@ export default function EncoderConfig() {
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  <SelectItem value="Same">与电角度方向相同 (Same)</SelectItem>
-                  <SelectItem value="Reverse">
-                    与电角度方向相反 (Reverse)
-                  </SelectItem>
+                  {ENCODER_DIRECTIONS.map((d) => (
+                    <SelectItem value={d} key={d}>
+                      {d === "CW" ? "CW (+1)" : "CCW (-1)"}
+                    </SelectItem>
+                  ))}
+                  {encoderConfig.encoder_direction === "None" && (
+                    <SelectItem value="None" disabled>
+                      未配置 (None)
+                    </SelectItem>
+                  )}
                 </SelectGroup>
               </SelectContent>
             </Select>
@@ -168,6 +200,7 @@ export default function EncoderConfig() {
               id="Offset"
               type="number"
               value={encoderConfig.encoder_offset}
+              disabled={!ready}
               onChange={(e) =>
                 setPartValue(
                   setEncoderConfig,
@@ -184,12 +217,13 @@ export default function EncoderConfig() {
             </ButtonGroupText>
             <Select
               value={encoderConfig.encoder_type}
+              disabled={!ready}
               onValueChange={(v) =>
                 setPartValue(
                   setEncoderConfig,
                   encoderConfig,
                   "encoder_type",
-                  v as EncoderType,
+                  v as WritableEncoderType,
                 )
               }
             >
@@ -198,11 +232,17 @@ export default function EncoderConfig() {
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  {Object.entries(EncoderType).map(([k, v]) => (
-                    <SelectItem value={v} key={k}>
-                      {k}
+                  {ENCODER_TYPES.map((t) => (
+                    <SelectItem value={t} key={t}>
+                      {t}
                     </SelectItem>
                   ))}
+                  {(encoderConfig.encoder_type === "None" ||
+                    encoderConfig.encoder_type === "Unknown") && (
+                    <SelectItem value={encoderConfig.encoder_type} disabled>
+                      未配置 ({encoderConfig.encoder_type})
+                    </SelectItem>
+                  )}
                 </SelectGroup>
               </SelectContent>
             </Select>

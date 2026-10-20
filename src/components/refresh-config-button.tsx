@@ -5,7 +5,7 @@ import { useSetAtom } from "jotai";
 import { motorConfigAtom } from "@/stores/motor.ts";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
-import { MotorConfig } from "@/motor.ts";
+import type { MotorConfig } from "@/motor.ts";
 
 export default function RefreshConfigButton() {
   const [refreshing, setRefreshing] = useState(false);

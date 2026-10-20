@@ -1,355 +1,866 @@
-use crate::calibration_parser::CalibrationParser;
-use crate::command::{MotorCalibrationCommand, MotorConfigCommand, MotorConfigSave, MotorFeedbackCommand, MotorRunCommand, MotorState};
+use crate::calibration_parser::{CalibrationParser, CalibrationState, CalibrationStatus};
+use crate::command::{
+    MotorCalibrationCommand, MotorConfigCommand, MotorRunCommand, MotorState, MAX_MOTOR_ID,
+};
 use crate::config_parser::{ConfigParser, MotorConfig};
 use crate::error::MotorError;
 use crate::exit_signal::ExitSignal;
 use crate::serial::SerialDevice;
-use log::{error, warn};
-use scan_fmt::scan_fmt;
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
+use log::warn;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-pub use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::select;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
-// const MAX_HISTORY: usize = 100000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Timestamped<T> {
-    pub timestamp: u64, // 毫秒
-    pub value: T,
-    pub r#type: String,
+/// 固件同步命令回包的等待上限。
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// 校准由固件主循环异步逐阶段上报，沿用既有总时长上限。
+const CALIBRATION_TIMEOUT: Duration = Duration::from_secs(120);
+/// 串口读取任务在断开时广播的哨兵行。
+const DISCONNECTED_SENTINEL: &str = "__DISCONNECTED__";
+/// `get_config` 是只读命令，没有对应的写入命令类型。
+const GET_CONFIG_COMMAND: &str = "get_config\r\n";
+
+/// 固件同步命令的结束标记：`ok` 或 `error <reason>`。
+enum Ack {
+    Ok,
+    Error(String),
 }
 
-impl<T> Timestamped<T> {
-    pub fn new(value: T, r#type: String) -> Self {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        Self { timestamp: ts, value, r#type }
+/// 识别固件回包中的结束标记；数据行返回 `None`。
+fn classify_ack(line: &str) -> Option<Ack> {
+    if line == "ok" {
+        return Some(Ack::Ok);
+    }
+    if line == "error" {
+        return Some(Ack::Error("unspecified".to_string()));
+    }
+    if let Some(reason) = line.strip_prefix("error ") {
+        let reason = reason.trim();
+        return Some(Ack::Error(if reason.is_empty() {
+            "unspecified".to_string()
+        } else {
+            reason.to_string()
+        }));
+    }
+    None
+}
+
+/// 一次等待的结束方式。
+enum WaitOutcome {
+    /// 收到 `ok`，该请求的边界已确定。
+    Ack,
+    /// 已收到完整 `error <reason>` 行或确认断开：边界确定，连接可继续使用。
+    Failed(MotorError),
+    /// 超时/丢行：回包边界未知，必须关闭串口，避免迟到回包被下一条命令误认。
+    Uncertain(MotorError),
+}
+
+fn require_finite(value: f32, name: &str) -> Result<(), MotorError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(MotorError::InvalidParameter(format!(
+            "{name} must be a finite number"
+        )))
     }
 }
 
-
-fn try_parse_and_emit<T: Serialize + Clone>(
-    line: &str,
-    app: &AppHandle,
-    type_name: &str,
-    warn_label: &str,
-    parse: impl FnOnce(&str) -> Option<T>,
-) {
-    match parse(line) {
-        Some(value) => {
-            if let Err(e) = app.emit("motor_feedback_update", Timestamped::new(value, type_name.to_string())) {
-                error!("Tauri emit error {e}");
+/// 按固件 setter 的实际取值范围校验配置参数（uart_com.cpp + motor.cpp）。
+fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
+    match cmd {
+        MotorConfigCommand::ConfigPositionPid {
+            kp,
+            ki,
+            kd,
+            output_max,
+        } => {
+            require_finite(*kp, "kp")?;
+            require_finite(*ki, "ki")?;
+            require_finite(*kd, "kd")?;
+            require_finite(*output_max, "output_max")?;
+            if *kp <= 0.0 || *ki <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "kp and ki must be greater than zero".to_string(),
+                ));
+            }
+            if *kd < 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "kd must not be negative".to_string(),
+                ));
+            }
+            if *output_max <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "output_max must be greater than zero".to_string(),
+                ));
             }
         }
-        None => warn!("Failed to parse {} feedback: {}", warn_label, line),
+        MotorConfigCommand::ConfigSpeedPi { kp, ki, output_max } => {
+            require_finite(*kp, "kp")?;
+            require_finite(*ki, "ki")?;
+            require_finite(*output_max, "output_max")?;
+            if *kp <= 0.0 || *ki <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "kp and ki must be greater than zero".to_string(),
+                ));
+            }
+            if *output_max <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "output_max must be greater than zero".to_string(),
+                ));
+            }
+        }
+        MotorConfigCommand::ConfigCurrentPi { kp, ki } => {
+            require_finite(*kp, "kp")?;
+            require_finite(*ki, "ki")?;
+            if *kp <= 0.0 || *ki <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "kp and ki must be greater than zero".to_string(),
+                ));
+            }
+        }
+        MotorConfigCommand::ConfigEncoder {
+            pole_pairs,
+            encoder_direction,
+            encoder_offset,
+            encoder_type,
+        } => {
+            if !(1..=255).contains(pole_pairs) {
+                return Err(MotorError::InvalidParameter(
+                    "pole_pairs must be in 1..=255".to_string(),
+                ));
+            }
+            require_finite(*encoder_offset, "encoder_offset")?;
+            if !encoder_direction.is_writable() {
+                return Err(MotorError::InvalidParameter(
+                    "encoder_direction must be CW or CCW".to_string(),
+                ));
+            }
+            if !encoder_type.is_writable() {
+                return Err(MotorError::InvalidParameter(
+                    "encoder_type must be AS5600, MT6701_IIC, MT6701_SPI or AS5047P".to_string(),
+                ));
+            }
+        }
+        // 固件 motor_t::set_id 拒绝 id > k_max_id（motor.hpp，标准帧 ID 范围）。
+        MotorConfigCommand::ConfigId(id) => {
+            if *id > MAX_MOTOR_ID {
+                return Err(MotorError::InvalidParameter(format!(
+                    "id must be in 0..={} because the firmware set_id rejects larger values",
+                    MAX_MOTOR_ID
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MotorFeedbackState {
-    None,
-    Speed,
-    Position,
-    Current,
-    Udc,
+fn prepare_config_command(
+    cmd: &MotorConfigCommand,
+    state: &MotorState,
+) -> Result<(String, Option<MotorState>), MotorError> {
+    if !state.allows_config() {
+        return Err(MotorError::InvalidState(format!(
+            "configuration is only allowed in Ready state, current state {state}"
+        )));
+    }
+    validate_config_command(cmd)?;
+    let command = cmd.to_string(state).ok_or_else(|| {
+        MotorError::InvalidParameter(
+            "configuration values are outside the supported range".to_string(),
+        )
+    })?;
+    Ok((command, None))
+}
+
+fn prepare_run_command(
+    cmd: &MotorRunCommand,
+    state: &MotorState,
+) -> Result<(String, Option<MotorState>), MotorError> {
+    let next_state = match cmd {
+        MotorRunCommand::SetSpeed(speed) => {
+            require_finite(*speed, "speed")?;
+            MotorState::SpeedControl
+        }
+        MotorRunCommand::SetPosition(position) => {
+            require_finite(*position, "position")?;
+            MotorState::PositionControl
+        }
+        MotorRunCommand::SetCurrent(current) => {
+            require_finite(*current, "current")?;
+            MotorState::CurrentControl
+        }
+        MotorRunCommand::Stop => MotorState::Ready,
+        MotorRunCommand::ClearFault => MotorState::Ready,
+    };
+
+    let allowed = match cmd {
+        MotorRunCommand::ClearFault => state.allows_clear_fault(),
+        _ => state.allows_run_command(),
+    };
+    if !allowed {
+        return Err(MotorError::InvalidState(format!(
+            "command is not allowed in state {state}"
+        )));
+    }
+
+    let command = cmd.to_string(state).ok_or_else(|| {
+        MotorError::InvalidParameter(
+            "run command rejected for the current state or parameters".to_string(),
+        )
+    })?;
+    Ok((command, Some(next_state)))
+}
+
+/// 解析 raw console 中 `set_* <value>` 的唯一数值参数。
+fn parse_raw_value(command: &str, name: &str) -> Result<f32, MotorError> {
+    let mut tokens = command.split_whitespace();
+    tokens.next();
+    let value = tokens.next();
+    if tokens.next().is_some() {
+        return Err(MotorError::InvalidParameter(format!(
+            "{name} expects exactly one numeric argument"
+        )));
+    }
+    let value = value
+        .and_then(|token| token.parse::<f32>().ok())
+        .ok_or_else(|| {
+            MotorError::InvalidParameter(format!("{name} expects one numeric argument"))
+        })?;
+    require_finite(value, name)?;
+    Ok(value)
 }
 
 #[derive(Debug)]
 pub struct Motor {
     pub serial: Arc<SerialDevice>,
+    /// 固件上报的电机状态；未知/初始化/校准状态一律不视为可运行。
     pub state: Mutex<MotorState>,
-    pub feedback: Mutex<MotorFeedbackState>,
+    /// 最近一次 `get_config` 的确认结果。
     pub motor_config: Mutex<Option<MotorConfig>>,
     pub app: AppHandle,
-    pub unsaved: AtomicBool, // 是否有未保存的配置
-
-    parser_feedback_handle: Mutex<Option<JoinHandle<()>>>,
-    parser_feedback_exit_signal: Arc<ExitSignal>,
-
-    // pub speed_history: Mutex<VecDeque<Timestamped<f32>>>,
-    // pub position_history: Mutex<VecDeque<Timestamped<f32>>>,
-    // pub current_history: Mutex<VecDeque<Timestamped<(f32, f32, f32)>>>,
-    // pub udc_history: Mutex<VecDeque<Timestamped<f32>>>,
+    /// 所有请求（含 raw console）共用一把锁：写与回包必须一一配对。
+    request_lock: Mutex<()>,
+    console_handle: Mutex<Option<JoinHandle<()>>>,
+    console_exit_signal: Arc<ExitSignal>,
 }
+
 impl Motor {
     pub fn new(serial: Arc<SerialDevice>, app: AppHandle) -> Arc<Self> {
         Arc::new(Self {
             serial,
-            state: Mutex::new(MotorState::Stop),
-            feedback: Mutex::new(MotorFeedbackState::None),
+            state: Mutex::new(MotorState::Unknown),
             motor_config: Mutex::new(None),
             app,
-            // speed_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
-            // position_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
-            // current_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
-            // udc_history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
-            unsaved: AtomicBool::new(false),
-            parser_feedback_handle: Default::default(),
-            parser_feedback_exit_signal: ExitSignal::new(),
+            request_lock: Mutex::new(()),
+            console_handle: Mutex::new(None),
+            console_exit_signal: ExitSignal::new(),
         })
     }
 
-    async fn send_command(self: &Arc<Self>, cmd: String) -> Result<(), MotorError> {
-        self.app.emit("serial-sent", &cmd).unwrap();
-        self.serial.send(cmd.as_str()).await.map_err(|e| MotorError::SerialError(e))
-    }
-
-    pub async fn set_feedback(self: &Arc<Self>, new_feedback: MotorFeedbackState) -> Result<(), MotorError> {
-        let mut feedback = self.feedback.lock().await;
-        if *feedback == new_feedback {
-            return Ok(());
-        }
-        let cmd = match new_feedback {
-            MotorFeedbackState::None => MotorFeedbackCommand::GetNone.to_string(),
-            MotorFeedbackState::Speed => MotorFeedbackCommand::GetSpeed.to_string(),
-            MotorFeedbackState::Position => MotorFeedbackCommand::GetPosition.to_string(),
-            MotorFeedbackState::Current => MotorFeedbackCommand::GetCurrent.to_string(),
-            MotorFeedbackState::Udc => MotorFeedbackCommand::GetUdc.to_string(),
-        };
-        match self.send_command(cmd).await {
-            Ok(()) => {
-                *feedback = new_feedback;
-                Ok(())
-            }
-            Err(e) => Err(e)
+    fn emit_state(&self, state: MotorState) {
+        if let Err(e) = self.app.emit("motor-state-change", state) {
+            warn!("failed to emit motor-state-change: {e}");
         }
     }
 
-    /// 从下位机加载 config 并返回
-    pub async fn load_config(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
-        let mut feedback = self.feedback.lock().await;
-        let cmd = MotorFeedbackCommand::GetConfig.to_string();
-        self.send_command(cmd).await?;
-        *feedback = MotorFeedbackState::None;
-        // 发送之后立即释放 feedback
-        drop(feedback);
+    /// 原始控制台发送记录：去掉 CRLF，前端按行显示。
+    fn emit_sent(&self, command: &str) {
+        let line = command.trim_end_matches(|c: char| c == '\r' || c == '\n');
+        if let Err(e) = self.app.emit("serial-sent", line) {
+            warn!("failed to emit serial-sent: {e}");
+        }
+    }
+
+    fn emit_calibration_state(&self, state: &CalibrationState) {
+        if let Err(e) = self.app.emit("calibration-state", state) {
+            warn!("failed to emit calibration-state: {e}");
+        }
+    }
+
+    /// 与固件状态同步，仅在变化时通知前端，并让配置缓存中的 state 保持一致。
+    pub async fn set_state(&self, next: MotorState) {
+        let mut current = self.state.lock().await;
+        if *current == next {
+            return;
+        }
+        *current = next;
+        drop(current);
+        if let Some(config) = self.motor_config.lock().await.as_mut() {
+            config.state = next;
+        }
+        self.emit_state(next);
+    }
+
+    /// 超时/丢行后回包边界无法确定：关闭串口，由用户重新连接。
+    async fn close_on_uncertain_boundary(&self) {
+        warn!(
+            "serial reply boundary unknown, closing port {}",
+            self.serial.port_name
+        );
+        let _ = self.serial.disconnect().await;
+    }
+
+    /// 启动常驻控制台任务：每条原始行都转发给前端。
+    pub async fn start_console_loop(self: &Arc<Self>) {
         let mut rx = self.serial.recv_event_tx.subscribe();
-        // 待解析的数据
-        let mut config_parser = ConfigParser::default();
-        let mut section = String::new();
-        let duration = Duration::from_secs(5);
-        let result = timeout(duration, async {
-            while let Ok(line) = rx.recv().await {
-                config_parser.parse_line(&line, &mut section);
-
-                if config_parser.is_complete() {
-                    break;
-                }
-            }
-        }).await;
-        match result {
-            Ok(_) =>
-                match config_parser.try_into_motor_config() {
-                    Ok(motor_config) => {
-                        let mut config = self.motor_config.lock().await;
-                        *config = Some(motor_config.clone());
-                        Ok(motor_config)
-                    }
-                    Err(e) => Err(MotorError::ParseError(e.to_string()))
-                },
-            Err(_) => Err(MotorError::Timeout),
-        }
-    }
-
-    pub async fn send_running_command(self: &Arc<Self>, run_cmd: &MotorRunCommand) -> Result<(), MotorError> {
-        let mut state = self.state.lock().await;
-        if let Some(line) = run_cmd.to_string(&state) {
-            self.send_command(line).await
-        } else {
-            Err(MotorError::InvalidState("cannot send command in current state".into()))
-        }?;
-        // 更新电机状态，Feedback 状态
-        match run_cmd {
-            MotorRunCommand::Stop => {
-                *state = MotorState::Stop;
-                *self.feedback.lock().await = MotorFeedbackState::None;
-            }
-            MotorRunCommand::SetPosition(_) => {
-                *state = MotorState::DebugRun;
-                *self.feedback.lock().await = MotorFeedbackState::Position;
-            }
-            MotorRunCommand::SetSpeed(_) => {
-                *state = MotorState::DebugRun;
-                *self.feedback.lock().await = MotorFeedbackState::Speed;
-            }
-        }
-        // 向前端同步电机状态
-        self.app.emit("motor-state-change", *state).unwrap();
-        Ok(())
-    }
-
-    pub async fn send_config_command(self: &Arc<Self>, config_cmd: &MotorConfigCommand) -> Result<(), MotorError> {
-        let state = self.state.lock().await;
-        if let Some(line) = config_cmd.to_string(&state) {
-            self.send_command(line).await?;
-            self.unsaved.store(true, Relaxed);
-            Ok(())
-        } else {
-            Err(MotorError::InvalidState("cannot send command in current state".into()))
-        }
-    }
-
-    pub async fn save_config(self: &Arc<Self>) -> Result<(), MotorError> {
-        if self.unsaved.load(Relaxed) {
-            let state = self.state.lock().await;
-            if let Some(line) = MotorConfigSave.to_string(&state) {
-                self.send_command(line).await?;
-                self.unsaved.store(false, Relaxed);
-                Ok(())
-            } else {
-                Err(MotorError::InvalidState("cannot send command in current state".into()))
-            }
-        } else {
-            Ok(())
-        }
-    }
-
-    pub async fn calibration(self: &Arc<Self>) -> Result<(), MotorError> {
-        let mut state = self.state.lock().await;
-        if let Some(line) = MotorCalibrationCommand::Calibration.to_string(&state) {
-            self.send_command(line).await?;
-            *state = MotorState::Test;
-            // 向前端同步状态
-            self.app.emit("motor-state-change", MotorState::Test).unwrap();
-            // TODO: 等待校准完成
-            let mut rx = self.serial.recv_event_tx.subscribe();
-            let duration = Duration::from_secs(120);
-            let mut parser = CalibrationParser::new();
-            let result = timeout(duration, async {
-                while let Ok(line) = rx.recv().await {
-                    match parser.parse(&line) {
-                        Ok(_) => {
-                            self.app.emit("calibration-state", &parser.state).unwrap();
-                            if parser.is_done() {
-                                return Ok(());
+        let app = self.app.clone();
+        let exit_signal = Arc::clone(&self.console_exit_signal);
+        let handle = tokio::spawn(async move {
+            loop {
+                select! {
+                    line = rx.recv() => match line {
+                        Ok(line) if line == DISCONNECTED_SENTINEL => {
+                            if let Err(e) = app.emit("motor-disconnected", ()) {
+                                warn!("failed to emit motor-disconnected: {e}");
+                            }
+                            break;
+                        }
+                        Ok(line) => {
+                            if let Err(e) = app.emit("serial-received", &line) {
+                                warn!("failed to emit serial-received: {e}");
                             }
                         }
-                        Err(e) => {
-                            return Err(MotorError::CalibrationError(e.to_string()))
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("serial console lagged, {n} lines dropped");
                         }
-                    }
-                }
-                Err(MotorError::SerialError("recv error".into()))
-            }).await;
-            // 校准完成后（不管是成功还是失败）回到停止状态
-            *state = MotorState::Stop;
-            // 向前端同步状态
-            self.app.emit("motor-state-change", MotorState::Stop).unwrap();
-            // 不管是否成功都认为有未保存的数据
-            self.unsaved.store(true, Relaxed);
-            match result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    return Err(e);
-                }
-                Err(_) => {
-                    return Err(MotorError::Timeout);
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = exit_signal.wait() => break,
                 }
             }
-            Ok(())
-        } else {
-            Err(MotorError::InvalidState("cannot calibration in current state".into()))
-        }
+        });
+        *self.console_handle.lock().await = Some(handle);
     }
 
-    // pub async fn push_speed(&self, value: f32) {
-    //     let mut hist = self.speed_history.lock().await;
-    //     hist.push_back(Timestamped::new(value));
-    //     if hist.len() > MAX_HISTORY { hist.pop_front(); }
-    // }
-    //
-    // pub async fn push_position(&self, value: f32) {
-    //     let mut hist = self.position_history.lock().await;
-    //     hist.push_back(Timestamped::new(value));
-    //     if hist.len() > MAX_HISTORY { hist.pop_front(); }
-    // }
-    //
-    // pub async fn push_current(&self, value: (f32, f32, f32)) {
-    //     let mut hist = self.current_history.lock().await;
-    //     hist.push_back(Timestamped::new(value));
-    //     if hist.len() > MAX_HISTORY { hist.pop_front(); }
-    // }
-    //
-    // pub async fn push_udc(&self, value: f32) {
-    //     let mut hist = self.udc_history.lock().await;
-    //     hist.push_back(Timestamped::new(value));
-    //     if hist.len() > MAX_HISTORY { hist.pop_front(); }
-    // }
-
-    pub async fn start_parse_feedback_loop(self: &Arc<Self>) {
-        let this = Arc::clone(self);
-        *self.parser_feedback_handle.lock().await = Some(tokio::spawn(async move {
-            let _ = this.parse_feedback_loop().await;
-        }));
-    }
-
-    pub async fn stop_parse_feedback_loop(self: &Arc<Self>) {
-        self.parser_feedback_exit_signal.trigger();
-        if let Some(handle) = self.parser_feedback_handle.lock().await.take() {
+    /// 停止常驻控制台任务（用户主动断开时先触发，避免误报断开事件）。
+    pub async fn stop_console_loop(&self) {
+        self.console_exit_signal.trigger();
+        if let Some(handle) = self.console_handle.lock().await.take() {
             let _ = handle.await;
         }
     }
 
-    async fn parse_feedback_loop(self: Arc<Self>) {
+    /// 串行执行一次「写入 + 等待 ack」事务（自行获取请求锁）。
+    async fn transact<P, H>(
+        self: &Arc<Self>,
+        wait: Duration,
+        prepare: P,
+        handler: H,
+    ) -> Result<(), MotorError>
+    where
+        P: FnOnce(&MotorState) -> Result<(String, Option<MotorState>), MotorError>,
+        H: FnMut(&str) -> Result<(), MotorError>,
+    {
+        let _guard = self.request_lock.lock().await;
+        self.transact_locked(wait, prepare, handler).await
+    }
+
+    /// `transact` 的实现：调用方必须已持有 `request_lock`。用于「读取快照 +
+    /// 提交结果」必须在同一锁周期内完成的事务（见 `load_config`）。
+    ///
+    /// `prepare` 负责校验当前状态并生成命令行；`handler` 处理 ack 之前的非
+    /// 结束行（例如 `get_config` 的数据行）。只有收到 `ok` 才返回成功；
+    /// `error <reason>`、超时、断开都会传播。
+    async fn transact_locked<P, H>(
+        self: &Arc<Self>,
+        wait: Duration,
+        prepare: P,
+        mut handler: H,
+    ) -> Result<(), MotorError>
+    where
+        P: FnOnce(&MotorState) -> Result<(String, Option<MotorState>), MotorError>,
+        H: FnMut(&str) -> Result<(), MotorError>,
+    {
+        let state = *self.state.lock().await;
+        let (command, next_state) = prepare(&state)?;
+
+        // 订阅必须早于写入：固件回包可能紧随写入之后到达。
         let mut rx = self.serial.recv_event_tx.subscribe();
+        self.emit_sent(&command);
+        self.serial
+            .send(&command)
+            .await
+            .map_err(MotorError::SerialError)?;
 
-        loop {
-            select! {
-                line_result = rx.recv() => {
-                    let line = match line_result {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    };
-
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
+        let outcome = timeout(wait, async {
+            loop {
+                match rx.recv().await {
+                    Ok(line) if line == DISCONNECTED_SENTINEL => {
+                        return WaitOutcome::Failed(MotorError::Disconnected);
                     }
-
-                    if line == "__DISCONNECTED__" {
-                        self.app.emit("motor-disconnected", ()).unwrap();
-                        break;
+                    Ok(line) => match classify_ack(&line) {
+                        Some(Ack::Ok) => return WaitOutcome::Ack,
+                        Some(Ack::Error(reason)) => {
+                            return WaitOutcome::Failed(MotorError::FirmwareError(reason));
+                        }
+                        None => {
+                            if let Err(e) = handler(&line) {
+                                return WaitOutcome::Uncertain(e);
+                            }
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        return WaitOutcome::Uncertain(MotorError::SerialError(format!(
+                            "serial receive lagged, {n} lines dropped"
+                        )));
                     }
-
-                    let current_feedback = *self.feedback.lock().await;
-                    if current_feedback == MotorFeedbackState::None {
-                        self.app.emit("serial-received", line).unwrap();
-                    }
-
-                    match current_feedback {
-                        MotorFeedbackState::Speed => {
-                            try_parse_and_emit(line, &self.app, "speed", "speed",
-                                |l| scan_fmt!(l, "speed: {}", f32).ok(),
-                            );
-                        }
-                        MotorFeedbackState::Position => {
-                            try_parse_and_emit(line, &self.app, "position", "position",
-                                |l| scan_fmt!(l, "position: {}", f32).ok(),
-                            );
-                        }
-                        MotorFeedbackState::Current => {
-                            try_parse_and_emit(line, &self.app, "iabc", "current",
-                                |l| scan_fmt!(l, "iabc:{},{},{}", f32, f32, f32).ok(),
-                            );
-                        }
-                        MotorFeedbackState::Udc => {
-                            try_parse_and_emit(line, &self.app, "udc", "udc",
-                                |l| scan_fmt!(l, "udc: {}", f32).ok(),
-                            );
-                        }
-                        MotorFeedbackState::None => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return WaitOutcome::Failed(MotorError::Disconnected);
                     }
                 }
-                _ = self.parser_feedback_exit_signal.wait() => return,
+            }
+        })
+        .await;
+
+        match outcome {
+            Ok(WaitOutcome::Ack) => {}
+            Ok(WaitOutcome::Failed(e)) => return Err(e),
+            Ok(WaitOutcome::Uncertain(e)) => {
+                self.close_on_uncertain_boundary().await;
+                return Err(e);
+            }
+            Err(_) => {
+                self.close_on_uncertain_boundary().await;
+                return Err(MotorError::Timeout);
             }
         }
+
+        // 只有 ack 之后才同步新状态（set_state 同时刷新配置缓存里的 state）。
+        if let Some(next) = next_state {
+            self.set_state(next).await;
+        }
+        Ok(())
+    }
+
+    /// 读取 `get_config`（7 行数据 + ok），成功时更新配置缓存并同步状态。
+    ///
+    /// 「读快照 + 提交缓存/状态」必须在同一个请求锁周期内完成，否则提交前可能被
+    /// 并发的运行命令写入更新的状态，再被这份旧快照覆盖。
+    pub async fn load_config(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
+        let _guard = self.request_lock.lock().await;
+
+        let mut parser = ConfigParser::default();
+        let mut parse_error: Option<String> = None;
+
+        self.transact_locked(
+            COMMAND_TIMEOUT,
+            |_state| Ok((GET_CONFIG_COMMAND.to_string(), None)),
+            |line| {
+                // 记录首个错误但继续读到 ack，保证写入与回包不错位。
+                if parse_error.is_none() {
+                    if let Err(e) = parser.parse_line(line) {
+                        parse_error = Some(e);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await?;
+
+        if let Some(e) = parse_error {
+            return Err(MotorError::ParseError(e));
+        }
+        let config = parser
+            .try_into_motor_config()
+            .map_err(MotorError::ParseError)?;
+        *self.motor_config.lock().await = Some(config.clone());
+        // 固件上报的状态是权威值：任何成功的 get_config（含 raw / 校准后刷新）都同步状态。
+        self.set_state(config.state).await;
+        Ok(config)
+    }
+
+    /// 刷新配置缓存；失败时失效缓存并返回原始错误，调用方不得静默成功。
+    pub async fn refresh_config_cache(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
+        match self.load_config().await {
+            Ok(config) => Ok(config),
+            Err(e) => {
+                warn!("failed to refresh motor config cache: {e}");
+                *self.motor_config.lock().await = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// 连接后的初始化：读取固件配置（load_config 同时同步固件上报的状态）。
+    pub async fn initialize(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
+        self.load_config().await
+    }
+
+    /// 写配置命令：仅 Ready 可用，收到 ok 后按固件确认值刷新缓存。
+    pub async fn send_config_command(
+        self: &Arc<Self>,
+        config_cmd: &MotorConfigCommand,
+    ) -> Result<(), MotorError> {
+        self.transact(
+            COMMAND_TIMEOUT,
+            |state| prepare_config_command(config_cmd, state),
+            |_| Ok(()),
+        )
+        .await?;
+        // 写入已被固件接受；读回失败必须显式报错并失效缓存，不能当作成功。
+        self.refresh_config_cache()
+            .await
+            .map_err(|e| MotorError::ConfigRefreshFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 运行/停机/清故障命令：仅收到 ok 后才更新电机状态。
+    pub async fn send_running_command(
+        self: &Arc<Self>,
+        run_cmd: &MotorRunCommand,
+    ) -> Result<(), MotorError> {
+        self.transact(
+            COMMAND_TIMEOUT,
+            |state| prepare_run_command(run_cmd, state),
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    /// 启动校准并处理固件异步上报的分隔块，直到终态块的结束分隔线。
+    ///
+    /// 等待期间不持有状态锁；失败时按固件上报的状态回写（不伪造 Ready），
+    /// 边界不确定（超时/丢行）时关闭串口而不是继续猜回包。
+    pub async fn calibration(self: &Arc<Self>) -> Result<CalibrationState, MotorError> {
+        let guard = self.request_lock.lock().await;
+
+        let state = *self.state.lock().await;
+        if !state.allows_calibration() {
+            return Err(MotorError::InvalidState(format!(
+                "calibration is only allowed in Ready state, current state {state}"
+            )));
+        }
+        let command = MotorCalibrationCommand::Calibration
+            .to_string(&state)
+            .ok_or_else(|| {
+                MotorError::InvalidState(format!("calibration not allowed in state {state}"))
+            })?;
+
+        let mut rx = self.serial.recv_event_tx.subscribe();
+        self.emit_sent(&command);
+        self.serial
+            .send(&command)
+            .await
+            .map_err(MotorError::SerialError)?;
+
+        let mut parser = CalibrationParser::new();
+        let mut started = false;
+        let mut parse_error: Option<String> = None;
+        let mut reported_state: Option<MotorState> = None;
+
+        let wait = timeout(CALIBRATION_TIMEOUT, async {
+            loop {
+                let line = match rx.recv().await {
+                    Ok(line) => line,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        return WaitOutcome::Uncertain(MotorError::SerialError(format!(
+                            "serial receive lagged, {n} lines dropped"
+                        )));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return WaitOutcome::Failed(MotorError::Disconnected);
+                    }
+                };
+                if line == DISCONNECTED_SENTINEL {
+                    return WaitOutcome::Failed(MotorError::Disconnected);
+                }
+
+                if !started {
+                    // 启动阶段的 `ok` / `error ...` 与后续异步块分开处理。
+                    match classify_ack(&line) {
+                        Some(Ack::Ok) => {
+                            started = true;
+                            self.set_state(MotorState::Calibration).await;
+                        }
+                        Some(Ack::Error(reason)) => {
+                            return WaitOutcome::Failed(MotorError::FirmwareError(reason));
+                        }
+                        None => {}
+                    }
+                    continue;
+                }
+
+                match parser.parse(&line) {
+                    Ok(true) => self.emit_calibration_state(&parser.state),
+                    Ok(false) => {}
+                    Err(e) => {
+                        if parse_error.is_none() {
+                            parse_error = Some(e);
+                        }
+                    }
+                }
+
+                // 报告中的 state 行是权威值：出现即同步（失败时通常为 Fault）。
+                if let Some(motor_state) = parser.state.motor_state {
+                    if reported_state != Some(motor_state) {
+                        reported_state = Some(motor_state);
+                        self.set_state(motor_state).await;
+                    }
+                }
+
+                // 结束分隔线不再改变 payload，必须每行都检查；只有 success 才算成功。
+                if parser.is_done() {
+                    return if parser.state.status == CalibrationStatus::Success {
+                        WaitOutcome::Ack
+                    } else {
+                        WaitOutcome::Failed(MotorError::CalibrationError(
+                            match &parser.state.failed_stage {
+                                Some(stage) => format!("calibration failed at stage {stage}"),
+                                None => "calibration failed".to_string(),
+                            },
+                        ))
+                    };
+                }
+            }
+        })
+        .await;
+
+        // 超时同样是“回包边界未知”：保留最后已知状态，关闭端口且不伪造 Ready。
+        let outcome = match wait {
+            Ok(outcome) => outcome,
+            Err(_) => WaitOutcome::Uncertain(MotorError::Timeout),
+        };
+
+        let must_close = matches!(outcome, WaitOutcome::Uncertain(_));
+        let result = match outcome {
+            // 成功终态必须带固件上报的 state；缺失即解析失败，保留最后已知状态。
+            WaitOutcome::Ack => match parser.state.motor_state {
+                Some(_) => Ok(()),
+                None => Err(MotorError::ParseError(
+                    "calibration succeeded without a motor state report".to_string(),
+                )),
+            },
+            WaitOutcome::Failed(e) => Err(e),
+            WaitOutcome::Uncertain(e) => Err(e),
+        };
+
+        let report = parser.state.clone();
+
+        // 成功或失败都要把最终 payload 送达前端（含 failed_stage / results）。
+        self.emit_calibration_state(&report);
+
+        if must_close {
+            // 边界不确定：保持 request_lock 直到关闭完成，避免下一条请求挤进错配窗口。
+            self.close_on_uncertain_boundary().await;
+        }
+
+        drop(guard);
+
+        match result {
+            Ok(()) => {
+                if let Some(e) = parse_error {
+                    return Err(MotorError::ParseError(e));
+                }
+                // 校准成功后固件会自动保存配置：读回失败必须显式报错。
+                self.refresh_config_cache()
+                    .await
+                    .map_err(|e| MotorError::ConfigRefreshFailed(e.to_string()))?;
+                Ok(report)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 原始控制台：只允许单行命令，受支持的命令走正常生命周期以保持状态/缓存正确。
+    pub async fn send_raw_command(self: &Arc<Self>, input: &str) -> Result<(), MotorError> {
+        if input.contains('\r') || input.contains('\n') {
+            return Err(MotorError::InvalidParameter(
+                "command must be a single line without CRLF".to_string(),
+            ));
+        }
+        let command = input.trim();
+        if command.is_empty() {
+            return Err(MotorError::InvalidParameter("command is empty".to_string()));
+        }
+
+        match command {
+            "calibration" => return self.calibration().await.map(|_| ()),
+            "stop" => return self.send_running_command(&MotorRunCommand::Stop).await,
+            "clear_fault" => {
+                return self
+                    .send_running_command(&MotorRunCommand::ClearFault)
+                    .await
+            }
+            "get_config" => {
+                self.load_config().await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let name = command.split_whitespace().next().unwrap_or_default();
+        match name {
+            "set_speed" => {
+                let speed = parse_raw_value(command, "set_speed")?;
+                return self
+                    .send_running_command(&MotorRunCommand::SetSpeed(speed))
+                    .await;
+            }
+            "set_position" => {
+                let position = parse_raw_value(command, "set_position")?;
+                return self
+                    .send_running_command(&MotorRunCommand::SetPosition(position))
+                    .await;
+            }
+            "set_current" => {
+                let current = parse_raw_value(command, "set_current")?;
+                return self
+                    .send_running_command(&MotorRunCommand::SetCurrent(current))
+                    .await;
+            }
+            _ => {}
+        }
+
+        let line = format!("{command}\r\n");
+        self.transact(COMMAND_TIMEOUT, move |_state| Ok((line, None)), |_| Ok(()))
+            .await?;
+
+        if name.starts_with("config_") {
+            // 配置写命令会改动固件配置：确认后刷新缓存，读回失败必须显式报错。
+            self.refresh_config_cache()
+                .await
+                .map_err(|e| MotorError::ConfigRefreshFailed(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_parser::{EncoderDirection, EncoderType};
+
+    /// 回包优先级：只有完整 `ok` / `error <reason>` 行才是结束标记。
+    #[test]
+    fn classifies_ack_lines() {
+        assert!(matches!(classify_ack("ok"), Some(Ack::Ok)));
+
+        match classify_ack("error parameter") {
+            Some(Ack::Error(reason)) => assert_eq!(reason, "parameter"),
+            _ => panic!("`error parameter` must be a firmware error"),
+        }
+        match classify_ack("error") {
+            Some(Ack::Error(reason)) => assert_eq!(reason, "unspecified"),
+            _ => panic!("bare `error` must be a firmware error"),
+        }
+
+        // 数据行与无关行不得被当作结束标记。
+        assert!(classify_ack("state Ready").is_none());
+        assert!(classify_ack("calibration_status running").is_none());
+        assert!(classify_ack("errors noted").is_none());
+    }
+
+    fn position_pid(kp: f32, ki: f32, kd: f32, output_max: f32) -> MotorConfigCommand {
+        MotorConfigCommand::ConfigPositionPid {
+            kp,
+            ki,
+            kd,
+            output_max,
+        }
+    }
+
+    /// 固件 setter 的取值范围必须在本地就被拒绝，避免发出必然失败的请求。
+    #[test]
+    fn rejects_out_of_range_config_values() {
+        assert!(validate_config_command(&position_pid(3.0, 3.0, 0.0, 2000.0)).is_ok());
+        assert!(validate_config_command(&position_pid(0.0, 3.0, 0.0, 2000.0)).is_err());
+        assert!(validate_config_command(&position_pid(3.0, 3.0, -1.0, 2000.0)).is_err());
+        assert!(validate_config_command(&position_pid(3.0, 3.0, 0.0, 0.0)).is_err());
+        assert!(validate_config_command(&position_pid(f32::NAN, 3.0, 0.0, 2000.0)).is_err());
+
+        assert!(validate_config_command(&MotorConfigCommand::ConfigSpeedPi {
+            kp: 0.03,
+            ki: 0.8,
+            output_max: 2.0,
+        })
+        .is_ok());
+        assert!(validate_config_command(&MotorConfigCommand::ConfigSpeedPi {
+            kp: 0.03,
+            ki: 0.8,
+            output_max: -1.0,
+        })
+        .is_err());
+
+        assert!(
+            validate_config_command(&MotorConfigCommand::ConfigCurrentPi { kp: 0.4, ki: 186.0 })
+                .is_ok()
+        );
+        assert!(
+            validate_config_command(&MotorConfigCommand::ConfigCurrentPi { kp: 0.0, ki: 186.0 })
+                .is_err()
+        );
+
+        assert!(validate_config_command(&MotorConfigCommand::ConfigId(0)).is_ok());
+        assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID)).is_ok());
+        assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID + 1)).is_err());
+        assert!(validate_config_command(&MotorConfigCommand::ConfigId(u32::MAX)).is_err());
+    }
+
+    #[test]
+    fn rejects_unwritable_encoder_values() {
+        let encoder =
+            |pole_pairs: u32, direction: EncoderDirection, offset: f32, ty: EncoderType| {
+                MotorConfigCommand::ConfigEncoder {
+                    pole_pairs,
+                    encoder_direction: direction,
+                    encoder_offset: offset,
+                    encoder_type: ty,
+                }
+            };
+
+        assert!(validate_config_command(&encoder(
+            7,
+            EncoderDirection::CCW,
+            1.6083,
+            EncoderType::MT6701SPI
+        ))
+        .is_ok());
+        assert!(validate_config_command(&encoder(
+            0,
+            EncoderDirection::CCW,
+            0.0,
+            EncoderType::AS5600
+        ))
+        .is_err());
+        assert!(validate_config_command(&encoder(
+            256,
+            EncoderDirection::CCW,
+            0.0,
+            EncoderType::AS5600
+        ))
+        .is_err());
+        assert!(validate_config_command(&encoder(
+            7,
+            EncoderDirection::None,
+            0.0,
+            EncoderType::AS5600
+        ))
+        .is_err());
+        assert!(
+            validate_config_command(&encoder(7, EncoderDirection::CW, 0.0, EncoderType::None))
+                .is_err()
+        );
+        assert!(validate_config_command(&encoder(
+            7,
+            EncoderDirection::CW,
+            f32::INFINITY,
+            EncoderType::AS5600
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn parses_raw_reference_arguments() {
+        assert_eq!(
+            parse_raw_value("set_speed 100", "set_speed").unwrap(),
+            100.0
+        );
+        assert!(parse_raw_value("set_speed", "set_speed").is_err());
+        assert!(parse_raw_value("set_speed 1 2", "set_speed").is_err());
+        assert!(parse_raw_value("set_speed NaN", "set_speed").is_err());
+        assert!(parse_raw_value("set_speed abc", "set_speed").is_err());
     }
 }

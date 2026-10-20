@@ -15,19 +15,21 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-function formatHex(v: number) {
-  return "0x" + v.toString(16).toUpperCase().padStart(2, "0");
-}
+// 固件 motor.hpp k_max_id=0x7FF：CLI wire 为 u32，但 set_id 拒绝 >2047
+const MAX_ID = 2047;
 
 function parseValue(raw: string): number | null {
   const s = raw.trim();
   if (!s) return null;
-  if (s.toLowerCase().startsWith("0x")) {
-    const hex = s.slice(2);
-    if (/^[0-9a-fA-F]+$/.test(hex)) return parseInt(hex, 16);
-    return null;
+  const hex = s.match(/^0x([0-9a-fA-F]+)$/);
+  if (hex) {
+    const v = parseInt(hex[1], 16);
+    return Number.isSafeInteger(v) && v <= MAX_ID ? v : null;
   }
-  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  if (/^\d+$/.test(s)) {
+    const v = parseInt(s, 10);
+    return v <= MAX_ID ? v : null;
+  }
   return null;
 }
 
@@ -36,25 +38,29 @@ export function IdInput({
   onChange,
   confirmOnSave = false,
   confirmMessage,
+  disabled = false,
 }: {
   value: number;
   onChange: (v: number) => void;
   confirmOnSave?: boolean;
   confirmMessage?: string;
+  disabled?: boolean;
 }) {
-  const [internalValue, setInternalValue] = useState("");
-  const [editing, setEditing] = useState(false);
+  const [internalValue, setInternalValue] = useState(String(value));
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // prop 变化时同步草稿；用户正在输入（internalValue 改变）不会触发本 effect
   useEffect(() => {
-    if (!editing) setInternalValue(formatHex(value));
-  }, [editing, value]);
+    setInternalValue(String(value));
+  }, [value]);
+
+  const parsed = parseValue(internalValue);
 
   const doSave = () => {
-    const parsed = parseValue(internalValue);
-    if (parsed !== null) onChange(parsed);
-    setInternalValue(parsed !== null ? formatHex(parsed) : formatHex(value));
-    setEditing(false);
+    const v = parseValue(internalValue);
+    if (v === null) return; // 无效草稿绝不回退写入旧值
+    onChange(v);
+    setInternalValue(String(v));
   };
 
   const handleSaveClick = () => {
@@ -66,18 +72,13 @@ export function IdInput({
   };
 
   const handleReset = () => {
-    setInternalValue(formatHex(value));
-    setEditing(false);
+    setInternalValue(String(value));
   };
 
   const handleBlur = () => {
-    setEditing(false);
-    const parsed = parseValue(internalValue);
-    if (parsed !== null) {
-      setInternalValue(formatHex(parsed > 0xff ? value : parsed));
-    } else {
-      setInternalValue(formatHex(value));
-    }
+    // 仅规范化有效草稿；无效则保持原始输入，不重置为旧值
+    const v = parseValue(internalValue);
+    if (v !== null) setInternalValue(String(v));
   };
 
   return (
@@ -85,14 +86,14 @@ export function IdInput({
       <ButtonGroup className="w-full">
         <ButtonGroupText asChild>
           <Label className="w-28" htmlFor="ID">
-            ID
+            ID (0..2047)
           </Label>
         </ButtonGroupText>
 
         <Input
           id="ID"
           value={internalValue}
-          onFocus={() => setEditing(true)}
+          disabled={disabled}
           onChange={(e) => setInternalValue(e.target.value)}
           onBlur={handleBlur}
         />
@@ -101,7 +102,12 @@ export function IdInput({
           <RefreshCcw />
         </Button>
 
-        <Button variant="outline" size="icon" onClick={handleSaveClick}>
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={handleSaveClick}
+          disabled={disabled || parsed === null}
+        >
           <Save />
         </Button>
       </ButtonGroup>

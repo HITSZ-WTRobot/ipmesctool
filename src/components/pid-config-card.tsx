@@ -20,6 +20,7 @@ export function PidConfigCard<T extends Record<string, number>>({
   hasDiff,
   reload,
   save,
+  disabled = false,
 }: {
   name: string;
   value: T;
@@ -28,6 +29,7 @@ export function PidConfigCard<T extends Record<string, number>>({
   hasDiff: boolean;
   reload: () => void;
   save: () => void;
+  disabled?: boolean;
 }) {
   return (
     <Card>
@@ -41,7 +43,12 @@ export function PidConfigCard<T extends Record<string, number>>({
           >
             <RefreshCcw />
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={save}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={save}
+            disabled={disabled}
+          >
             <Save />
           </Button>
         </CardAction>
@@ -59,6 +66,7 @@ export function PidConfigCard<T extends Record<string, number>>({
               type="number"
               min={0}
               value={value[k]}
+              disabled={disabled}
               onChange={(e) =>
                 setPartValue<T>(
                   setValue,

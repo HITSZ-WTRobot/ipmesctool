@@ -1,31 +1,20 @@
-import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import {
   motorConfigAtom,
-  motorConfigUnsavedAtom,
   motorConnectedAtom,
-  type MotorState as MotorStateType,
   motorStateAtom,
 } from "@/stores/motor.ts";
+import type { MotorState as MotorStateType } from "@/motor.ts";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 
 export function MotorState() {
   const [motorState, setMotorState] = useAtom(motorStateAtom);
-  const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
+  const motorConfig = useAtomValue(motorConfigAtom);
   const connect = useAtomValue(motorConnectedAtom);
-  const setUnsaved = useSetAtom(motorConfigUnsavedAtom);
 
   useEffect(() => {
-    invoke("get_motor_state").then((state) => {
-      setMotorState(state as MotorStateType);
-    });
-
-    invoke("is_motor_config_unsaved").then((unsaved) =>
-      setUnsaved(unsaved as boolean),
-    );
-
     const l = listen("motor-state-change", (event) => {
       setMotorState(event.payload as MotorStateType);
     });
@@ -33,21 +22,14 @@ export function MotorState() {
     return () => {
       l.then((unlisten) => unlisten());
     };
-  }, [setMotorState, setUnsaved]);
+  }, [setMotorState]);
 
   return motorConfig && connect ? (
     <div className="w-full flex flex-col text-sm gap-2">
       <div className="w-full border rounded-md px-3 py-2 flex flex-col gap-1">
         <div className="flex items-center">
           <span className="text-muted-foreground w-20">ID</span>
-          <span className="font-medium">
-            {`0x${motorConfig.id.toString(16).padStart(2, "0").toUpperCase()}`}
-          </span>
-        </div>
-
-        <div className="flex items-center">
-          <span className="text-muted-foreground w-20">Udc</span>
-          <span className="font-medium">{motorConfig.udc} V</span>
+          <span className="font-medium">{motorConfig.id}</span>
         </div>
 
         <div className="flex items-center">
@@ -63,9 +45,13 @@ export function MotorState() {
           className={cn(
             "font-medium",
             motorState === "Fault" && "text-destructive",
-            motorState === "Run" && "text-primary",
-            motorState === "DebugRun" && "text-blue-600 dark:text-blue-400",
-            motorState === "Test" && "text-amber-600 dark:text-amber-400",
+            (motorState === "SpeedControl" ||
+              motorState === "PositionControl") &&
+              "text-primary",
+            motorState === "CurrentControl" &&
+              "text-blue-600 dark:text-blue-400",
+            motorState === "Calibration" &&
+              "text-amber-600 dark:text-amber-400",
           )}
         >
           {motorState}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -28,9 +28,11 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
   name,
   warning,
   pi,
+  extra,
   hasDiff,
   reload,
   save,
+  disabled = false,
 }: {
   name: string;
   warning: string;
@@ -39,9 +41,11 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
     setValue: (v: T) => void;
     labels: Record<keyof T, string>;
   }[];
+  extra?: ReactNode;
   hasDiff: boolean;
   reload: () => void;
   save: () => void;
+  disabled?: boolean;
 }) {
   const [unlock, setUnlock] = useState(false);
 
@@ -59,7 +63,12 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
               >
                 <RefreshCcw />
               </Button>
-              <Button variant="ghost" size="icon-sm" onClick={save}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={save}
+                disabled={disabled}
+              >
                 <Save />
               </Button>
             </>
@@ -87,6 +96,7 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
         </CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
+        {extra}
         {pi.map(({ value, setValue, labels }, index) => (
           <div key={index} className="text-sm flex flex-col gap-2">
             {(Object.keys(value) as (keyof T)[]).map((k) => (
@@ -100,7 +110,7 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
                   id={`${name}.${k as string}`}
                   type="number"
                   value={value[k]}
-                  disabled={!unlock}
+                  disabled={!unlock || disabled}
                   onChange={(e) =>
                     setPartValue<T>(
                       setValue,
