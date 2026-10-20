@@ -5,8 +5,10 @@ use crate::command::{
 use crate::config_parser::{ConfigParser, MotorConfig};
 use crate::error::MotorError;
 use crate::exit_signal::ExitSignal;
-use crate::serial::SerialDevice;
+use crate::serial::{SerialDevice, TELEMETRY_CAPACITY};
+use crate::telemetry::TelemetryMode;
 use log::warn;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::select;
@@ -243,6 +245,7 @@ pub struct Motor {
     pub app: AppHandle,
     /// 所有请求（含 raw console）共用一把锁：写与回包必须一一配对。
     request_lock: Mutex<()>,
+    telemetry_mode: Mutex<TelemetryMode>,
     console_handle: Mutex<Option<JoinHandle<()>>>,
     console_exit_signal: Arc<ExitSignal>,
 }
@@ -255,6 +258,7 @@ impl Motor {
             motor_config: Mutex::new(None),
             app,
             request_lock: Mutex::new(()),
+            telemetry_mode: Mutex::new(TelemetryMode::None),
             console_handle: Mutex::new(None),
             console_exit_signal: ExitSignal::new(),
         })
@@ -272,6 +276,63 @@ impl Motor {
         if let Err(e) = self.app.emit("serial-sent", line) {
             warn!("failed to emit serial-sent: {e}");
         }
+    }
+
+    fn emit_telemetry_mode(&self, mode: TelemetryMode) {
+        if let Err(e) = self.app.emit("telemetry-mode", mode) {
+            warn!("failed to emit telemetry-mode: {e}");
+        }
+    }
+
+    pub async fn get_telemetry_mode(&self) -> TelemetryMode {
+        *self.telemetry_mode.lock().await
+    }
+
+    /// The firmware deliberately sends no ack for these commands. This reports
+    /// successful serial writing only and never changes the motor state.
+    pub async fn set_telemetry_mode(
+        self: &Arc<Self>,
+        mode: TelemetryMode,
+    ) -> Result<(), MotorError> {
+        let _guard = self.request_lock.lock().await;
+        self.set_telemetry_mode_locked(mode).await
+    }
+
+    async fn set_telemetry_mode_locked(&self, mode: TelemetryMode) -> Result<(), MotorError> {
+        self.serial
+            .send(mode.command())
+            .await
+            .map_err(MotorError::SerialError)?;
+        let mut current = self.telemetry_mode.lock().await;
+        if !self.serial.connected.load(Ordering::Relaxed) {
+            return Err(MotorError::Disconnected);
+        }
+        *current = mode;
+        self.emit_sent(mode.command());
+        self.emit_telemetry_mode(mode);
+        Ok(())
+    }
+
+    async fn clear_telemetry(&self) {
+        let mut mode = self.telemetry_mode.lock().await;
+        *mode = TelemetryMode::None;
+        self.serial.clear_telemetry();
+        self.emit_telemetry_mode(TelemetryMode::None);
+    }
+
+    /// Serialize the final no-ack stream stop with all ordinary transactions.
+    /// Always close the port, even when the final write fails.
+    pub async fn disconnect(self: &Arc<Self>) -> Result<(), MotorError> {
+        let _guard = self.request_lock.lock().await;
+        let result = if self.serial.connected.load(Ordering::Relaxed) {
+            self.set_telemetry_mode_locked(TelemetryMode::None).await
+        } else {
+            Ok(())
+        };
+        let close_result = self.serial.disconnect().await.map_err(MotorError::SerialError);
+        self.clear_telemetry().await;
+        self.stop_console_loop().await;
+        result.and(close_result)
     }
 
     fn emit_calibration_state(&self, state: &CalibrationState) {
@@ -303,16 +364,21 @@ impl Motor {
         let _ = self.serial.disconnect().await;
     }
 
-    /// 启动常驻控制台任务：每条原始行都转发给前端。
+    /// Forward ordinary console lines and flush bounded telemetry batches at ~30Hz.
     pub async fn start_console_loop(self: &Arc<Self>) {
         let mut rx = self.serial.recv_event_tx.subscribe();
+        let this = Arc::clone(self);
         let app = self.app.clone();
         let exit_signal = Arc::clone(&self.console_exit_signal);
         let handle = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(33));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut batch = Vec::with_capacity(TELEMETRY_CAPACITY);
             loop {
                 select! {
                     line = rx.recv() => match line {
                         Ok(line) if line == DISCONNECTED_SENTINEL => {
+                            this.clear_telemetry().await;
                             if let Err(e) = app.emit("motor-disconnected", ()) {
                                 warn!("failed to emit motor-disconnected: {e}");
                             }
@@ -328,6 +394,17 @@ impl Motor {
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
+                    _ = tick.tick() => {
+                        if this.serial.connected.load(Ordering::Relaxed) {
+                            this.serial.drain_telemetry(&mut batch);
+                            if !batch.is_empty() {
+                                if let Err(e) = app.emit("telemetry-samples", &batch) {
+                                    warn!("failed to emit telemetry-samples: {e}");
+                                }
+                                batch.clear();
+                            }
+                        }
+                    }
                     _ = exit_signal.wait() => break,
                 }
             }
@@ -484,8 +561,9 @@ impl Motor {
         }
     }
 
-    /// 连接后的初始化：读取固件配置（load_config 同时同步固件上报的状态）。
+    /// Stop any stream left running by a previous client before reading config.
     pub async fn initialize(self: &Arc<Self>) -> Result<MotorConfig, MotorError> {
+        self.set_telemetry_mode(TelemetryMode::None).await?;
         self.load_config().await
     }
 
@@ -674,6 +752,10 @@ impl Motor {
         let command = input.trim();
         if command.is_empty() {
             return Err(MotorError::InvalidParameter("command is empty".to_string()));
+        }
+
+        if let Some(mode) = TelemetryMode::from_command(command) {
+            return self.set_telemetry_mode(mode).await;
         }
 
         match command {

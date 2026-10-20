@@ -1,15 +1,41 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
-import { useAtom, useSetAtom } from "jotai";
+import { atom, useAtomValue, useSetAtom } from "jotai";
 import { serialDataAtom } from "@/stores/serial.ts";
+import type { SerialData } from "@/stores/serial.ts";
+import { pageAtom } from "@/stores/page.ts";
 import { motorConfigAtom, motorStateAtom } from "@/stores/motor.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { motorConfigSchema, type MotorState } from "@/motor.ts";
+import { motorConfigSchema } from "@/motor.ts";
+import type { MotorState } from "@/motor.ts";
+
+// Hidden persistent consoles keep the bounded store, but do not reconcile 5000 rows per batch.
+const visibleSerialDataAtom = atom((get) => get(pageAtom) === "Debug.Serial" ? get(serialDataAtom) : []);
+const rowKeys = new WeakMap<SerialData, number>();
+let nextRowKey = 0;
+function rowKey(item: SerialData) {
+  let key = rowKeys.get(item);
+  if (key === undefined) {
+    key = nextRowKey++;
+    rowKeys.set(item, key);
+  }
+  return key;
+}
+const SerialRow = memo(function SerialRow({ item }: { item: SerialData }) {
+  return (
+    <div className={`rounded-md px-2 py-1 text-sm font-mono whitespace-pre-wrap ${item.type === "rx" ? "bg-blue-900/50 text-blue-200" : "bg-green-900/50 text-green-200"}`}>
+      <span className="opacity-60 mr-2">{new Date(item.timestamp).toLocaleTimeString()}</span>
+      <span className="font-bold mr-2">{item.type === "rx" ? "RX →" : "TX ←"}</span>
+      {item.data}
+    </div>
+  );
+});
 
 export default function SerialConsole() {
-  const [serialData, setSerialData] = useAtom(serialDataAtom);
+  const serialData = useAtomValue(visibleSerialDataAtom);
+  const setSerialData = useSetAtom(serialDataAtom);
   const setConfig = useSetAtom(motorConfigAtom);
   const setMotorState = useSetAtom(motorStateAtom);
   const [command, setCommand] = useState("");
@@ -29,13 +55,20 @@ export default function SerialConsole() {
       return;
     }
     if (command.length === 0) return;
+    const telemetryMode = command.match(/^get_(none|iabc|idq|speed|position)$/)?.[1];
     try {
-      await invoke("send_serial_command", { command });
+      if (telemetryMode) {
+        await invoke("set_telemetry_mode", { mode: telemetryMode });
+      } else {
+        await invoke("send_serial_command", { command });
+      }
       setCommand("");
     } catch (e) {
       toast.error(`发送失败: ${e}`);
       return;
     }
+    // Stream controls only switch mode and never return ok or change motor configuration.
+    if (telemetryMode) return;
     // raw 命令可能改变了设备状态/配置，刷新前端缓存以反映到其它页面；
     // 读取失败必须报出（命令本身已成功，但缓存可能已过期）
     try {
@@ -59,30 +92,7 @@ export default function SerialConsole() {
         ref={scrollRef}
         className="flex-1 overflow-y-auto bg-neutral-950 text-neutral-100 rounded-md p-3 space-y-2"
       >
-        {serialData.map((item, index) => (
-          <div
-            key={index}
-            className={`rounded-md px-2 py-1 text-sm font-mono whitespace-pre-wrap
-              ${
-                item.type === "rx"
-                  ? "bg-blue-900/50 text-blue-200"
-                  : "bg-green-900/50 text-green-200"
-              }`}
-          >
-            {/* 时间戳 */}
-            <span className="opacity-60 mr-2">
-              {new Date(item.timestamp).toLocaleTimeString()}
-            </span>
-
-            {/* 方向 */}
-            <span className="font-bold mr-2">
-              {item.type === "rx" ? "RX →" : "TX ←"}
-            </span>
-
-            {/* 内容 */}
-            {item.data}
-          </div>
-        ))}
+        {serialData.map((item) => <SerialRow key={rowKey(item)} item={item} />)}
       </div>
 
       {/* 发送区 */}

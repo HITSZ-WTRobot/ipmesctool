@@ -1703,6 +1703,7 @@ name = "ipmesctool"
 version = "0.3.0"
 dependencies = [
  "log",
+ "parking_lot",
  "serde",
  "serde_json",
  "strum",

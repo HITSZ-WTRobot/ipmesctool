@@ -12,6 +12,7 @@ mod exit_signal;
 mod invokes;
 mod motor;
 mod serial;
+mod telemetry;
 
 pub fn start_serial_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -57,6 +58,8 @@ pub fn run() {
             disconnect_motor,
             get_motor_port,
             get_motor_state,
+            set_telemetry_mode,
+            get_telemetry_mode,
             get_motor_config,
             refresh_motor_config,
             config_motor_position_pid,

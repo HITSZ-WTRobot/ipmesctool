@@ -7,6 +7,7 @@ import React, { JSX, Suspense, useRef } from "react";
 import { pageAtom, PageID, windowLockedAtom } from "@/stores/page.ts";
 import { useAtomValue } from "jotai";
 import { useSerialDebug } from "@/stores/serial.ts";
+import { useTelemetry } from "@/stores/telemetry.ts";
 import {
   AngleDisplaySwitcher,
   SpeedDisplaySwitcher,
@@ -20,6 +21,7 @@ const DeviceInfo = React.lazy(() => import("@/pages/device-info.tsx"));
 
 export const LazyPages = {
   "Debug.Serial": SerialConsole,
+  "Debug.Plot": React.lazy(() => import("@/pages/plot.tsx")),
   "Motor.PID": PidConfig,
   "Motor.Encoder": React.lazy(() => import("@/pages/encoder-config.tsx")),
   "Motor.Calibration": React.lazy(() => import("@/pages/calibration.tsx")),
@@ -60,6 +62,7 @@ function App() {
   const page = useAtomValue(pageAtom);
   const locked = useAtomValue(windowLockedAtom);
   useSerialDebug();
+  useTelemetry();
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       {locked && (

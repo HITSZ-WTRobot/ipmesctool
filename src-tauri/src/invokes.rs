@@ -3,6 +3,7 @@ use crate::command::{MotorConfigCommand, MotorRunCommand};
 use crate::config_parser::{EncoderDirection, EncoderType, MotorConfig};
 use crate::motor::Motor;
 use crate::serial::SerialDevice;
+use crate::telemetry::TelemetryMode;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
@@ -62,8 +63,7 @@ pub async fn connect_motor(
 
     // 连接必须用 get_config 校验：失败时干净地关闭串口。
     if let Err(e) = motor.initialize().await {
-        motor.stop_console_loop().await;
-        let _ = motor.serial.disconnect().await;
+        let _ = motor.disconnect().await;
         return Err(format!("failed to verify device on {port_name}: {e}"));
     }
 
@@ -71,8 +71,7 @@ pub async fn connect_motor(
     if motor_guard.is_some() {
         // 并发连接的竞态：放弃本次连接，保留先注册的那一个。
         drop(motor_guard);
-        motor.stop_console_loop().await;
-        let _ = motor.serial.disconnect().await;
+        let _ = motor.disconnect().await;
         return Err("Motor is already connected".to_string());
     }
     *motor_guard = Some(motor);
@@ -81,10 +80,9 @@ pub async fn connect_motor(
 
 #[tauri::command]
 pub async fn disconnect_motor(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut motor_guard = state.motor.lock().await;
-    if let Some(motor) = motor_guard.take() {
-        motor.serial.disconnect().await?;
-        motor.stop_console_loop().await;
+    let motor = state.motor.lock().await.take();
+    if let Some(motor) = motor {
+        motor.disconnect().await.map_err(|e| e.to_string())?;
         Ok(())
     } else {
         Err("Motor is not connected".to_string())
@@ -102,6 +100,24 @@ pub async fn get_motor_state(state: tauri::State<'_, AppState>) -> Result<String
         let motor_state = *motor.state.lock().await;
         Ok(motor_state.to_string())
     })
+}
+
+#[tauri::command]
+pub async fn set_telemetry_mode(
+    mode: TelemetryMode,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    with_motor!(state, |motor| motor
+        .set_telemetry_mode(mode)
+        .await
+        .map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn get_telemetry_mode(
+    state: tauri::State<'_, AppState>,
+) -> Result<TelemetryMode, String> {
+    with_motor!(state, |motor| Ok(motor.get_telemetry_mode().await))
 }
 
 #[tauri::command]
