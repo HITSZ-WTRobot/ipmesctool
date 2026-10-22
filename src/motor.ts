@@ -55,6 +55,13 @@ export const currentPI = z.object({
 
 export type CurrentPI = z.infer<typeof currentPI>;
 
+/** 任一相电流绝对值超过此阈值即触发 Fault，不是指令限幅。 */
+export const currentProtection = z.object({
+  current_limit: z.number().finite().positive(),
+});
+
+export type CurrentProtection = z.infer<typeof currentProtection>;
+
 /** 电机电气参数，由校准识别，无运行时写入命令（只读展示） */
 export const motorElectricalConfig = z.object({
   rs: z.number(),
@@ -103,6 +110,7 @@ export type EncoderConfig = z.infer<typeof encoderConfig>;
 export const motorConfigSchema = z.object({
   state: motorState,
   id: z.number().int().min(0).max(4294967295),
+  protection: currentProtection,
   motor: motorElectricalConfig,
   position_pid: positionPID,
   speed_pi: speedPI,

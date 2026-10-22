@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import { pageAtom, windowLockedAtom } from "@/stores/page.ts";
-import { useAtomValue, useSetAtom } from "jotai";
+import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -14,7 +14,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card.tsx";
-import { motorConfigSchema, type MotorState } from "@/motor.ts";
+import { motorConfigSchema, type MotorState, type SpeedSweep } from "@/motor.ts";
+import { PidConfigCard } from "@/components/pid-config-card";
+import { shallowEqual } from "@/lib/utils";
+
+const speedSweepAtom = atom<SpeedSweep | null>(null);
 
 type CalibrationStatus = "idle" | "running" | "success" | "failed";
 
@@ -31,13 +35,18 @@ export default function Calibration() {
   const state = useAtomValue(motorStateAtom);
   const setLocked = useSetAtom(windowLockedAtom);
   const setPage = useSetAtom(pageAtom);
-  const setConfig = useSetAtom(motorConfigAtom);
+  const [config, setConfig] = useAtom(motorConfigAtom);
+  const [speedSweep, setSpeedSweep] = useAtom(speedSweepAtom);
   const setMotorState = useSetAtom(motorStateAtom);
   const [calibrating, setCalibrating] = useState<boolean>(false);
   const [calState, setCalState] = useState<CalibrationState | null>(null);
   const calStateRef = useRef<CalibrationState | null>(null);
   // listen() 是异步的；发送命令前必须确保已订阅，避免丢失立即上报
   const listenReadyRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    setSpeedSweep(config ? { ...config.speed_sweep } : null);
+  }, [config, setSpeedSweep]);
 
   // 始终监听校准进度/结果对象；组件卸载时正确清理
   useEffect(() => {
@@ -109,6 +118,36 @@ export default function Calibration() {
 
   return (
     <div className="w-full flex flex-col">
+      <section className="m-4 space-y-3" aria-labelledby="calibration-settings-title">
+        <h2 id="calibration-settings-title" className="font-semibold">校准参数</h2>
+        {config && speedSweep ? (
+          <PidConfigCard
+            name="Speed Sweep Current"
+            description="速度环参数辨识（speed_sweep）使用的正弦 q 轴电流幅值，必须为有限正数。这不是速度环 PI 的输出限幅；请根据电机和电流保护阈值谨慎设置，校准中实际相电流过大仍会触发 Fault。仅 Ready 状态可修改，保存后自动写入 Flash 并读回配置。"
+            value={speedSweep}
+            setValue={setSpeedSweep}
+            labels={{ iq_amplitude: "Iq 幅值 (A)" }}
+            hasDiff={!shallowEqual(speedSweep, config.speed_sweep)}
+            reload={() => setSpeedSweep({ ...config.speed_sweep })}
+            disabled={calibrating || state !== "Ready"}
+            save={async () => {
+              if (calibrating || state !== "Ready") return;
+              const current = speedSweep.iq_amplitude;
+              if (!Number.isFinite(current) || current <= 0) {
+                toast.error("校准电流幅值必须为有限正数");
+                return;
+              }
+              try {
+                await invoke("config_motor_speed_sweep_current", { current });
+                const raw = await invoke("get_motor_config");
+                setConfig(motorConfigSchema.parse(raw));
+              } catch (e) {
+                toast.error(`保存校准电流失败: ${e}`);
+              }
+            }}
+          />
+        ) : <p className="text-sm text-muted-foreground">电机配置未加载</p>}
+      </section>
       <Card className="m-4">
         <CardHeader>
           <CardTitle>电机校准</CardTitle>

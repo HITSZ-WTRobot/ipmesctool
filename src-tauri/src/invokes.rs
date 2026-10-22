@@ -1,7 +1,7 @@
 use crate::calibration_parser::CalibrationState;
 use crate::command::{MotorConfigCommand, MotorRunCommand};
 use crate::config_parser::{EncoderDirection, EncoderType, MotorConfig};
-use crate::motor::Motor;
+use crate::motor::{Motor, TelemetryState};
 use crate::serial::SerialDevice;
 use crate::telemetry::TelemetryMode;
 use std::sync::Arc;
@@ -114,10 +114,10 @@ pub async fn set_telemetry_mode(
 }
 
 #[tauri::command]
-pub async fn get_telemetry_mode(
+pub async fn get_telemetry_state(
     state: tauri::State<'_, AppState>,
-) -> Result<TelemetryMode, String> {
-    with_motor!(state, |motor| Ok(motor.get_telemetry_mode().await))
+) -> Result<TelemetryState<'static>, String> {
+    with_motor!(state, |motor| Ok(motor.get_telemetry_state().await))
 }
 
 #[tauri::command]
@@ -192,14 +192,34 @@ pub async fn config_motor_speed_sweep_current(
 }
 
 #[tauri::command]
-pub async fn config_motor_current_pi(
-    kp: f32,
-    ki: f32,
+pub async fn config_motor_current_limit(
+    current_limit: f32,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     with_motor!(state, |motor| {
         motor
-            .send_config_command(&MotorConfigCommand::ConfigCurrentPi { kp, ki })
+            .send_config_command(&MotorConfigCommand::ConfigCurrentLimit(current_limit))
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+pub async fn config_motor_current_pi(
+    d_kp: f32,
+    d_ki: f32,
+    q_kp: f32,
+    q_ki: f32,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    with_motor!(state, |motor| {
+        motor
+            .send_config_command(&MotorConfigCommand::ConfigCurrentPi {
+                d_kp,
+                d_ki,
+                q_kp,
+                q_ki,
+            })
             .await
             .map_err(|e| e.to_string())
     })

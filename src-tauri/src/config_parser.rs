@@ -11,12 +11,13 @@ pub struct MotorElectricalConfig {
     pub lq: f32,
 }
 
-/// 解析固件 `get_config` 的 8 行数据输出。
+/// 解析固件 `get_config` 的 9 行数据输出。
 ///
 /// 固件格式（每行 CRLF，浮点为 `%.7g` 可变位数）：
 /// ```text
 /// state Ready
 /// id 1
+/// protection current_limit=10
 /// motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778
 /// current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275
 /// speed_pi kp=0.03703183 ki=0.8226405 outputmax=2
@@ -31,6 +32,7 @@ pub struct MotorElectricalConfig {
 pub struct ConfigParser {
     state: Option<MotorState>,
     id: Option<u32>,
+    protection: Option<ProtectionConfig>,
     motor: Option<MotorElectricalConfig>,
     /// d_kp, d_ki, q_kp, q_ki
     current_pi: Option<[f32; 4]>,
@@ -61,6 +63,17 @@ impl ConfigParser {
             "id" => {
                 let value = single_token(rest, "id")?;
                 self.id = Some(parse_u32(value, "id")?);
+            }
+            "protection" => {
+                let pairs = kv_pairs(rest)?;
+                let current_limit = parse_float(
+                    kv(&pairs, "current_limit", "protection")?,
+                    "protection.current_limit",
+                )?;
+                if current_limit <= 0.0 {
+                    return Err("protection.current_limit: value must be greater than zero".to_string());
+                }
+                self.protection = Some(ProtectionConfig { current_limit });
             }
             "motor" => {
                 let pairs = kv_pairs(rest)?;
@@ -138,7 +151,7 @@ impl ConfigParser {
         Ok(())
     }
 
-    /// 将已解析的全部 7 行转换为 `MotorConfig`；缺少字段时返回列出所有缺失字段的错误。
+    /// 将已解析的全部 9 行转换为 `MotorConfig`；缺少字段时返回列出所有缺失字段的错误。
     pub fn try_into_motor_config(&self) -> Result<MotorConfig, String> {
         let mut missing: Vec<&str> = Vec::new();
         if self.state.is_none() {
@@ -146,6 +159,9 @@ impl ConfigParser {
         }
         if self.id.is_none() {
             missing.push("id");
+        }
+        if self.protection.is_none() {
+            missing.push("protection");
         }
         if self.motor.is_none() {
             missing.push("motor");
@@ -176,6 +192,7 @@ impl ConfigParser {
         Ok(MotorConfig {
             state: self.state.expect("checked above"),
             id: self.id.expect("checked above"),
+            protection: self.protection.clone().expect("checked above"),
             motor: self.motor.clone().expect("checked above"),
             position_pid: self.position_pid.clone().expect("checked above"),
             speed_pi: self.speed_pi.clone().expect("checked above"),
@@ -243,6 +260,12 @@ fn kv<'a>(pairs: &[(&'a str, &'a str)], key: &str, row: &str) -> Result<&'a str,
         }
     }
     found.ok_or_else(|| format!("{row}: missing field `{key}`"))
+}
+
+/// 每相电流绝对值的过流故障阈值（单位：A），不是电流指令限幅。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtectionConfig {
+    pub current_limit: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -326,6 +349,7 @@ pub struct EncoderConfig {
 pub struct MotorConfig {
     pub state: MotorState,
     pub id: u32,
+    pub protection: ProtectionConfig,
     pub motor: MotorElectricalConfig,
     pub position_pid: PositionPIDConfig,
     pub speed_pi: SpeedPIConfig,
@@ -343,6 +367,7 @@ mod tests {
     const SAMPLE: &[&str] = &[
         "state Ready",
         "id 1",
+        "protection current_limit=10",
         "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778",
         "current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275",
         "speed_pi kp=0.03703183 ki=0.8226405 outputmax=2",
@@ -368,6 +393,7 @@ mod tests {
 
         assert_eq!(config.state, MotorState::Ready);
         assert_eq!(config.id, 1);
+        assert_eq!(config.protection.current_limit, 10.0);
         assert!((config.motor.rs - 0.1867275).abs() < 1e-9);
         assert!((config.motor.ld - 0.0004650604).abs() < 1e-12);
         assert!((config.motor.lq - 0.0002910778).abs() < 1e-12);
@@ -464,6 +490,25 @@ mod tests {
     }
 
     #[test]
+    fn protection_is_required_and_rejects_invalid_thresholds() {
+        let mut parser = ConfigParser::default();
+        for line in SAMPLE.iter().filter(|line| !line.starts_with("protection ")) {
+            parser.parse_line(line).unwrap();
+        }
+        assert!(parser.try_into_motor_config().is_err());
+        for value in ["0", "-1", "NaN", "inf", "-inf", "invalid"] {
+            assert!(parser
+                .parse_line(&format!("protection current_limit={value}"))
+                .is_err());
+            assert!(parser.try_into_motor_config().is_err());
+        }
+        assert!(parser.parse_line("protection").is_err());
+        assert!(parser.parse_line("protection current_limit=1 current_limit=2").is_err());
+        parser.parse_line("protection current_limit=0.01").unwrap();
+        assert_eq!(parser.try_into_motor_config().unwrap().protection.current_limit, 0.01);
+    }
+
+    #[test]
     fn unrelated_lines_are_ignored() {
         let mut parser = ConfigParser::default();
         assert!(parser.parse_line("ok").is_ok());
@@ -474,27 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn partial_config_reports_all_missing_rows() {
-        let mut parser = ConfigParser::default();
-        parser.parse_line("state Ready").unwrap();
-        parser.parse_line("id 1").unwrap();
-        parser.parse_line("motor rs=1 ld=2 lq=3").unwrap();
-        let err = parser.try_into_motor_config().unwrap_err();
-        for missing in [
-            "current_pi",
-            "speed_pi",
-            "speed_sweep",
-            "position_pid",
-            "encoder",
-        ] {
-            assert!(
-                err.contains(missing),
-                "error `{err}` should mention {missing}"
-            );
+    fn every_configuration_row_is_required() {
+        for omitted in SAMPLE.iter().filter(|line| **line != "ok") {
+            let mut parser = ConfigParser::default();
+            for line in SAMPLE.iter().filter(|line| *line != omitted) {
+                parser.parse_line(line).unwrap();
+            }
+            assert!(parser.try_into_motor_config().is_err());
         }
-        assert!(
-            !err.contains("state"),
-            "state present, must not be reported missing"
-        );
     }
 }

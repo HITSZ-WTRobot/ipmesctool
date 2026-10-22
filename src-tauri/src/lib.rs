@@ -1,4 +1,5 @@
 use crate::invokes::*;
+use crate::telemetry_export::export_telemetry_csv;
 use log::debug;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -13,6 +14,7 @@ mod invokes;
 mod motor;
 mod serial;
 mod telemetry;
+mod telemetry_export;
 
 pub fn start_serial_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -42,6 +44,7 @@ pub fn start_serial_monitor(app: tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
             let state = AppState {
@@ -53,18 +56,20 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            export_telemetry_csv,
             list_serial_ports,
             connect_motor,
             disconnect_motor,
             get_motor_port,
             get_motor_state,
             set_telemetry_mode,
-            get_telemetry_mode,
+            get_telemetry_state,
             get_motor_config,
             refresh_motor_config,
             config_motor_position_pid,
             config_motor_speed_pi,
             config_motor_speed_sweep_current,
+            config_motor_current_limit,
             config_motor_current_pi,
             config_motor_encoder,
             config_motor_id,

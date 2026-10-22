@@ -60,6 +60,7 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
                 variant={hasDiff ? "destructive" : "ghost"}
                 size="icon-sm"
                 onClick={reload}
+                aria-label={`重新加载 ${name}`}
               >
                 <RefreshCcw />
               </Button>
@@ -68,6 +69,7 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
                 size="icon-sm"
                 onClick={save}
                 disabled={disabled}
+                aria-label={`保存 ${name}`}
               >
                 <Save />
               </Button>
@@ -75,7 +77,12 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
           ) : (
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button size="icon-sm" variant="destructive">
+                <Button
+                  size="icon-sm"
+                  variant="destructive"
+                  disabled={disabled}
+                  aria-label={`解锁 ${name}`}
+                >
                   <Key />
                 </Button>
               </AlertDialogTrigger>
@@ -109,7 +116,7 @@ export function PidConfigLockedCard<T extends Record<string, number>>({
                 <Input
                   id={`${name}.${k as string}`}
                   type="number"
-                  value={value[k]}
+                  value={Number.isNaN(value[k]) ? "" : value[k]}
                   disabled={!unlock || disabled}
                   onChange={(e) =>
                     setPartValue<T>(

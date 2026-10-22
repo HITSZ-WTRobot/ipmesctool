@@ -58,21 +58,26 @@ export default function Device({
     }
   }, [setConnected, setMotorConfig, setMotorState]);
 
+  // Telemetry owns session-tagged disconnect events. React only mirrors that
+  // connection transition here, so an old event cannot tear down a new device.
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    const disconnected = wasConnected.current && !connected;
+    wasConnected.current = connected;
+    if (!disconnected) return;
+    setConnecting(false);
+    setMotorConfig(undefined);
+    setMotorState("Unknown");
+    void disconnect();
+  }, [connected, setMotorConfig, setMotorState]);
+
   // Device events and port monitoring
   useEffect(() => {
-    const md = listen("motor-disconnected", () => {
-      setConnected(false);
-      setConnecting(false);
-      setMotorConfig(undefined);
-      setMotorState("Unknown");
-      disconnect().then();
-    });
     invoke("list_serial_ports").then((ports) => setPortList(ports as string[]));
     const spc = listen<string[]>("serial-port-changed", (event) => {
       setPortList(event.payload as string[]);
     });
     return () => {
-      md.then((un) => un());
       spc.then((un) => un());
     };
   }, [setConnected, setMotorConfig, setMotorState]);
@@ -115,12 +120,6 @@ export default function Device({
     setConnecting(false);
   }, [getConfigOrDisconnect, selected]);
 
-  const clearAndDisconnect = useCallback(async () => {
-    setConnected(false);
-    setMotorConfig(undefined);
-    setMotorState("Unknown");
-    await disconnect();
-  }, [setConnected, setMotorConfig, setMotorState]);
 
   return (
     <div
@@ -135,7 +134,7 @@ export default function Device({
           className="border-0 rounded-none border-r"
           variant="outline"
           size="icon"
-          onClick={() => void clearAndDisconnect()}
+          onClick={() => setConnected(false)}
         >
           <Unplug />
         </Button>

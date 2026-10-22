@@ -14,6 +14,7 @@ import { setPartValue } from "@/lib/utils";
 
 export function PidConfigCard<T extends Record<string, number>>({
   name,
+  description,
   value,
   setValue,
   labels,
@@ -23,6 +24,7 @@ export function PidConfigCard<T extends Record<string, number>>({
   disabled = false,
 }: {
   name: string;
+  description?: string;
   value: T;
   setValue: (v: T) => void;
   labels: Record<keyof T, string>;
@@ -40,6 +42,7 @@ export function PidConfigCard<T extends Record<string, number>>({
             variant={hasDiff ? "destructive" : "ghost"}
             size="icon-sm"
             onClick={reload}
+            aria-label={`重新加载 ${name}`}
           >
             <RefreshCcw />
           </Button>
@@ -48,12 +51,14 @@ export function PidConfigCard<T extends Record<string, number>>({
             size="icon-sm"
             onClick={save}
             disabled={disabled}
+            aria-label={`保存 ${name}`}
           >
             <Save />
           </Button>
         </CardAction>
       </CardHeader>
       <CardContent className="text-sm flex flex-col gap-2">
+        {description && <p className="text-muted-foreground">{description}</p>}
         {(Object.keys(value) as (keyof T)[]).map((k) => (
           <ButtonGroup className="w-full" key={k as string}>
             <ButtonGroupText asChild>
@@ -65,7 +70,7 @@ export function PidConfigCard<T extends Record<string, number>>({
               id={`${name}.${k as string}`}
               type="number"
               min={0}
-              value={value[k]}
+              value={Number.isNaN(value[k]) ? "" : value[k]}
               disabled={disabled}
               onChange={(e) =>
                 setPartValue<T>(

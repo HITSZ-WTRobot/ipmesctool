@@ -6,9 +6,10 @@ use crate::config_parser::{ConfigParser, MotorConfig};
 use crate::error::MotorError;
 use crate::exit_signal::ExitSignal;
 use crate::serial::{SerialDevice, TELEMETRY_CAPACITY};
-use crate::telemetry::TelemetryMode;
+use crate::telemetry::{TelemetryMode, TelemetrySample};
 use log::warn;
-use std::sync::atomic::Ordering;
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::select;
@@ -24,6 +25,29 @@ const CALIBRATION_TIMEOUT: Duration = Duration::from_secs(120);
 const DISCONNECTED_SENTINEL: &str = "__DISCONNECTED__";
 /// `get_config` 是只读命令，没有对应的写入命令类型。
 const GET_CONFIG_COMMAND: &str = "get_config\r\n";
+
+// A fixed per-Motor identity lets consumers reject delayed events after reconnect.
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryState<'a> {
+    session_id: Cow<'a, str>,
+    mode: TelemetryMode,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelemetrySamplesEvent<'a> {
+    session_id: &'a str,
+    samples: &'a [TelemetrySample],
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisconnectedEvent<'a> {
+    session_id: &'a str,
+}
 
 /// 固件同步命令的结束标记：`ok` 或 `error <reason>`。
 enum Ack {
@@ -122,13 +146,22 @@ fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
                 ));
             }
         }
-        MotorConfigCommand::ConfigCurrentPi { kp, ki } => {
-            require_finite(*kp, "kp")?;
-            require_finite(*ki, "ki")?;
-            if *kp <= 0.0 || *ki <= 0.0 {
+        MotorConfigCommand::ConfigCurrentLimit(current_limit) => {
+            require_finite(*current_limit, "current_limit")?;
+            if *current_limit <= 0.0 {
                 return Err(MotorError::InvalidParameter(
-                    "kp and ki must be greater than zero".to_string(),
+                    "current_limit must be greater than zero".to_string(),
                 ));
+            }
+        }
+        MotorConfigCommand::ConfigCurrentPi { d_kp, d_ki, q_kp, q_ki } => {
+            for (gain, name) in [(d_kp, "d_kp"), (d_ki, "d_ki"), (q_kp, "q_kp"), (q_ki, "q_ki")] {
+                require_finite(*gain, name)?;
+                if *gain <= 0.0 {
+                    return Err(MotorError::InvalidParameter(format!(
+                        "{name} must be greater than zero"
+                    )));
+                }
             }
         }
         MotorConfigCommand::ConfigEncoder {
@@ -243,9 +276,43 @@ fn parse_raw_value(command: &str, name: &str) -> Result<f32, MotorError> {
     Ok(value)
 }
 
+/// 已迁移的配置命令必须共用类型化命令的校验、状态与读回流程。
+fn parse_raw_config_command(command: &str) -> Result<Option<MotorConfigCommand>, MotorError> {
+    let mut tokens = command.split_whitespace();
+    let name = tokens.next().unwrap_or_default();
+    let config = match name {
+        "config_current_limit" => MotorConfigCommand::ConfigCurrentLimit(parse_raw_value(command, name)?),
+        "config_speed_sweep_current" => MotorConfigCommand::ConfigSpeedSweepCurrent(parse_raw_value(command, name)?),
+        "config_current_pi" => {
+            let mut next_gain = || {
+                tokens.next().and_then(|value| value.parse::<f32>().ok()).ok_or_else(|| {
+                    MotorError::InvalidParameter(
+                        "config_current_pi expects exactly four numeric arguments".to_string(),
+                    )
+                })
+            };
+            let config = MotorConfigCommand::ConfigCurrentPi {
+                d_kp: next_gain()?,
+                d_ki: next_gain()?,
+                q_kp: next_gain()?,
+                q_ki: next_gain()?,
+            };
+            if tokens.next().is_some() {
+                return Err(MotorError::InvalidParameter(
+                    "config_current_pi expects exactly four numeric arguments".to_string(),
+                ));
+            }
+            config
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(config))
+}
+
 #[derive(Debug)]
 pub struct Motor {
     pub serial: Arc<SerialDevice>,
+    session_id: String,
     /// 固件上报的电机状态；未知/初始化/校准状态一律不视为可运行。
     pub state: Mutex<MotorState>,
     /// 最近一次 `get_config` 的确认结果。
@@ -262,6 +329,7 @@ impl Motor {
     pub fn new(serial: Arc<SerialDevice>, app: AppHandle) -> Arc<Self> {
         Arc::new(Self {
             serial,
+            session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed).to_string(),
             state: Mutex::new(MotorState::Unknown),
             motor_config: Mutex::new(None),
             app,
@@ -287,13 +355,21 @@ impl Motor {
     }
 
     fn emit_telemetry_mode(&self, mode: TelemetryMode) {
-        if let Err(e) = self.app.emit("telemetry-mode", mode) {
+        let state = TelemetryState {
+            session_id: Cow::Borrowed(&self.session_id),
+            mode,
+        };
+        if let Err(e) = self.app.emit("telemetry-mode", state) {
             warn!("failed to emit telemetry-mode: {e}");
         }
     }
 
-    pub async fn get_telemetry_mode(&self) -> TelemetryMode {
-        *self.telemetry_mode.lock().await
+    pub async fn get_telemetry_state(&self) -> TelemetryState<'static> {
+        let mode = *self.telemetry_mode.lock().await;
+        TelemetryState {
+            session_id: Cow::Owned(self.session_id.clone()),
+            mode,
+        }
     }
 
     /// The firmware deliberately sends no ack for these commands. This reports
@@ -387,7 +463,7 @@ impl Motor {
                     line = rx.recv() => match line {
                         Ok(line) if line == DISCONNECTED_SENTINEL => {
                             this.clear_telemetry().await;
-                            if let Err(e) = app.emit("motor-disconnected", ()) {
+                            if let Err(e) = app.emit("motor-disconnected", DisconnectedEvent { session_id: &this.session_id }) {
                                 warn!("failed to emit motor-disconnected: {e}");
                             }
                             break;
@@ -406,7 +482,7 @@ impl Motor {
                         if this.serial.connected.load(Ordering::Relaxed) {
                             this.serial.drain_telemetry(&mut batch);
                             if !batch.is_empty() {
-                                if let Err(e) = app.emit("telemetry-samples", &batch) {
+                                if let Err(e) = app.emit("telemetry-samples", TelemetrySamplesEvent { session_id: &this.session_id, samples: &batch }) {
                                     warn!("failed to emit telemetry-samples: {e}");
                                 }
                                 batch.clear();
@@ -520,7 +596,7 @@ impl Motor {
         Ok(())
     }
 
-    /// 读取 `get_config`（8 行数据 + ok），成功时更新配置缓存并同步状态。
+    /// 读取 `get_config`（9 行数据 + ok），成功时更新配置缓存并同步状态。
     ///
     /// 「读快照 + 提交缓存/状态」必须在同一个请求锁周期内完成，否则提交前可能被
     /// 并发的运行命令写入更新的状态，再被这份旧快照覆盖。
@@ -781,6 +857,10 @@ impl Motor {
             _ => {}
         }
 
+        if let Some(config) = parse_raw_config_command(command)? {
+            return self.send_config_command(&config).await;
+        }
+
         let name = command.split_whitespace().next().unwrap_or_default();
         match name {
             "set_speed" => {
@@ -886,19 +966,112 @@ mod tests {
                 .is_err()
         );
 
-        assert!(
-            validate_config_command(&MotorConfigCommand::ConfigCurrentPi { kp: 0.4, ki: 186.0 })
-                .is_ok()
-        );
-        assert!(
-            validate_config_command(&MotorConfigCommand::ConfigCurrentPi { kp: 0.0, ki: 186.0 })
-                .is_err()
-        );
+        assert!(validate_config_command(&MotorConfigCommand::ConfigCurrentPi {
+            d_kp: 0.4,
+            d_ki: 186.0,
+            q_kp: 0.3,
+            q_ki: 150.0,
+        }).is_ok());
 
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(0)).is_ok());
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID)).is_ok());
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID + 1)).is_err());
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(u32::MAX)).is_err());
+    }
+
+    #[test]
+    fn current_pi_rejects_invalid_gains_on_each_axis() {
+        for axis in 0..4 {
+            for invalid in [0.0, -0.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut gains = [0.4, 180.0, 0.3, 150.0];
+                gains[axis] = invalid;
+                let config = MotorConfigCommand::ConfigCurrentPi {
+                    d_kp: gains[0],
+                    d_ki: gains[1],
+                    q_kp: gains[2],
+                    q_ki: gains[3],
+                };
+                assert!(matches!(
+                    prepare_config_command(&config, &MotorState::Ready),
+                    Err(MotorError::InvalidParameter(_))
+                ));
+                assert!(config.to_string(&MotorState::Ready).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn current_limit_requires_positive_finite_value_and_ready() {
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let config = MotorConfigCommand::ConfigCurrentLimit(invalid);
+            assert!(matches!(
+                prepare_config_command(&config, &MotorState::Ready),
+                Err(MotorError::InvalidParameter(_))
+            ));
+            assert!(config.to_string(&MotorState::Ready).is_none());
+        }
+        for value in [f32::MIN_POSITIVE, 1.0, f32::MAX] {
+            let config = MotorConfigCommand::ConfigCurrentLimit(value);
+            assert!(prepare_config_command(&config, &MotorState::Ready).is_ok());
+        }
+        for state in [
+            MotorState::Initialization,
+            MotorState::Calibration,
+            MotorState::CurrentControl,
+            MotorState::SpeedControl,
+            MotorState::PositionControl,
+            MotorState::Fault,
+            MotorState::Unknown,
+        ] {
+            for config in [
+                MotorConfigCommand::ConfigCurrentLimit(10.0),
+                MotorConfigCommand::ConfigCurrentPi { d_kp: 0.4, d_ki: 180.0, q_kp: 0.3, q_ki: 150.0 },
+            ] {
+                assert!(matches!(
+                    prepare_config_command(&config, &state),
+                    Err(MotorError::InvalidState(_))
+                ));
+                assert!(config.to_string(&state).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn raw_current_configuration_rejects_old_arity_and_invalid_values() {
+        for input in [
+            "config_current_pi",
+            "config_current_pi 0.4 180",
+            "config_current_pi 0.4 180 0.3",
+            "config_current_pi 0.4 180 0.3 150 extra",
+            "config_current_pi 0.4 invalid 0.3 150",
+            "config_current_limit",
+            "config_current_limit 1 2",
+            "config_speed_sweep_current 1 2",
+        ] {
+            assert!(matches!(parse_raw_config_command(input), Err(MotorError::InvalidParameter(_))));
+        }
+        for input in [
+            "config_current_pi 0.4 180 0.3 150",
+            "config_current_limit 10",
+            "config_speed_sweep_current 0.5",
+        ] {
+            let config = parse_raw_config_command(input).unwrap().unwrap();
+            assert!(prepare_config_command(&config, &MotorState::Ready).is_ok());
+            assert!(matches!(prepare_config_command(&config, &MotorState::Fault), Err(MotorError::InvalidState(_))));
+        }
+        for input in [
+            "config_current_pi 0 180 0.3 150",
+            "config_current_pi 0.4 180 NaN 150",
+            "config_current_pi 0.4 180 0.3 -1",
+            "config_current_limit 0",
+            "config_current_limit inf",
+            "config_speed_sweep_current -0.5",
+        ] {
+            let result = parse_raw_config_command(input).and_then(|config| {
+                prepare_config_command(&config.unwrap(), &MotorState::Ready)
+            });
+            assert!(matches!(result, Err(MotorError::InvalidParameter(_))));
+        }
     }
 
     #[test]

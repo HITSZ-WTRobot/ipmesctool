@@ -94,9 +94,12 @@ pub enum MotorConfigCommand {
         output_max: f32,
     },
     ConfigSpeedSweepCurrent(f32),
+    ConfigCurrentLimit(f32),
     ConfigCurrentPi {
-        kp: f32,
-        ki: f32,
+        d_kp: f32,
+        d_ki: f32,
+        q_kp: f32,
+        q_ki: f32,
     },
     ConfigEncoder {
         pole_pairs: u32,
@@ -125,13 +128,23 @@ impl MotorConfigCommand {
                 (kp.is_finite() && ki.is_finite() && output_max.is_finite())
                     .then(|| format!("config_speed_pi {kp} {ki} {output_max}\r\n"))
             }
-            MotorConfigCommand::ConfigSpeedSweepCurrent(current) => current
-                .is_finite()
-                .then(|| format!("config_speed_sweep_current {current}\r\n")),
-            MotorConfigCommand::ConfigCurrentPi { kp, ki } => {
-                (kp.is_finite() && ki.is_finite())
-                    .then(|| format!("config_current_pi {kp} {ki}\r\n"))
+            MotorConfigCommand::ConfigSpeedSweepCurrent(current) => {
+                (current.is_finite() && *current > 0.0)
+                    .then(|| format!("config_speed_sweep_current {current}\r\n"))
             }
+            MotorConfigCommand::ConfigCurrentLimit(current_limit) => {
+                (current_limit.is_finite() && *current_limit > 0.0)
+                    .then(|| format!("config_current_limit {current_limit}\r\n"))
+            }
+            MotorConfigCommand::ConfigCurrentPi {
+                d_kp,
+                d_ki,
+                q_kp,
+                q_ki,
+            } => [d_kp, d_ki, q_kp, q_ki]
+                .iter()
+                .all(|gain| gain.is_finite() && **gain > 0.0)
+                .then(|| format!("config_current_pi {d_kp} {d_ki} {q_kp} {q_ki}\r\n")),
             MotorConfigCommand::ConfigEncoder {
                 pole_pairs,
                 encoder_direction,

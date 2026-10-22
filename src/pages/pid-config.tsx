@@ -1,7 +1,7 @@
 import { atom, useAtom, useAtomValue } from "jotai";
 import { useEffect } from "react";
 import { motorConfigAtom, motorStateAtom } from "@/stores/motor";
-import type { CurrentPI, PositionPID, SpeedPI, SpeedSweep } from "@/motor";
+import { motorConfigSchema, type PositionPID, type SpeedPI } from "@/motor";
 import { setPartValue, shallowEqual } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -10,45 +10,29 @@ import { PidConfigLockedCard } from "@/components/pid-config-locked-card";
 
 const speedPIAtom = atom<SpeedPI | null>(null);
 const positionPIDAtom = atom<PositionPID | null>(null);
-const speedSweepAtom = atom<SpeedSweep | null>(null);
-const currentSharedPIAtom = atom<CurrentPI | null>(null);
+type CurrentGains = { d_kp: number; d_ki: number; q_kp: number; q_ki: number };
+const currentPIAtom = atom<CurrentGains | null>(null);
 
 export default function PidConfig() {
   const [motorConfig, setMotorConfig] = useAtom(motorConfigAtom);
   const state = useAtomValue(motorStateAtom);
   const [speedPI, setSpeedPI] = useAtom(speedPIAtom);
   const [positionPID, setPositionPID] = useAtom(positionPIDAtom);
-  const [speedSweep, setSpeedSweep] = useAtom(speedSweepAtom);
-  const [currentSharedPI, setCurrentSharedPI] = useAtom(currentSharedPIAtom);
+  const [currentPI, setCurrentPI] = useAtom(currentPIAtom);
 
-  // 断开/未连接时清空草稿，避免重连到另一台设备沿用旧值
+  // 页面切换保留草稿；断开时清空，新的固件配置读回后重新播种。
   useEffect(() => {
-    if (!motorConfig) {
-      setSpeedPI(null);
-      setPositionPID(null);
-      setSpeedSweep(null);
-      setCurrentSharedPI(null);
-      return;
-    }
-    if (speedPI === null) setSpeedPI({ ...motorConfig.speed_pi });
-    if (positionPID === null) setPositionPID({ ...motorConfig.position_pid });
-    if (speedSweep === null) setSpeedSweep({ ...motorConfig.speed_sweep });
-    if (currentSharedPI === null) {
-      setCurrentSharedPI({ ...motorConfig.current_id_pi });
-    }
-  }, [
-    motorConfig,
-    speedPI,
-    positionPID,
-    speedSweep,
-    currentSharedPI,
-    setSpeedPI,
-    setPositionPID,
-    setSpeedSweep,
-    setCurrentSharedPI,
-  ]);
+    setSpeedPI(motorConfig ? { ...motorConfig.speed_pi } : null);
+    setPositionPID(motorConfig ? { ...motorConfig.position_pid } : null);
+    setCurrentPI(motorConfig ? {
+      d_kp: motorConfig.current_id_pi.kp,
+      d_ki: motorConfig.current_id_pi.ki,
+      q_kp: motorConfig.current_iq_pi.kp,
+      q_ki: motorConfig.current_iq_pi.ki,
+    } : null);
+  }, [motorConfig, setSpeedPI, setPositionPID, setCurrentPI]);
 
-  if (!motorConfig || !speedPI || !positionPID || !speedSweep || !currentSharedPI) {
+  if (!motorConfig || !speedPI || !positionPID || !currentPI) {
     return <div>电机配置未加载</div>;
   }
 
@@ -104,30 +88,6 @@ export default function PidConfig() {
           }
         }}
       />
-      <PidConfigCard
-        name="Speed Sweep Current"
-        value={speedSweep}
-        setValue={setSpeedSweep}
-        labels={{ iq_amplitude: "Iq Amplitude (A)" }}
-        hasDiff={!shallowEqual(speedSweep, motorConfig.speed_sweep)}
-        reload={() => setSpeedSweep({ ...motorConfig.speed_sweep })}
-        disabled={!ready}
-        save={async () => {
-          try {
-            await invoke("config_motor_speed_sweep_current", {
-              current: speedSweep.iq_amplitude,
-            });
-            setPartValue(
-              setMotorConfig,
-              motorConfig,
-              "speed_sweep",
-              speedSweep,
-            );
-          } catch (e) {
-            toast.error(`保存失败, e: ${e}`);
-          }
-        }}
-      />
       <PidConfigLockedCard
         name="Current PI"
         warning="电流环 PI 是最底层闭环，参数错误会导致电机严重抖动甚至烧毁。确定你真的要修改吗？"
@@ -144,38 +104,44 @@ export default function PidConfig() {
               Iq kp={motorConfig.current_iq_pi.kp} ki=
               {motorConfig.current_iq_pi.ki}
             </span>
-            <span className="text-destructive">
-              下方 kp/ki 为 d/q 共用值，写入将同时覆盖 d 轴与 q 轴。
-            </span>
+            <span>下方分别设置 d 轴与 q 轴增益，保存后重新读取固件配置。</span>
           </div>
         }
         pi={[
           {
-            value: currentSharedPI,
-            setValue: setCurrentSharedPI,
-            labels: { kp: "Kp (d/q 共用)", ki: "Ki (d/q 共用)" },
+            value: currentPI,
+            setValue: setCurrentPI,
+            labels: { d_kp: "d 轴 Kp", d_ki: "d 轴 Ki", q_kp: "q 轴 Kp", q_ki: "q 轴 Ki" },
           },
         ]}
-        hasDiff={!shallowEqual(currentSharedPI, motorConfig.current_id_pi)}
-        reload={() => setCurrentSharedPI({ ...motorConfig.current_id_pi })}
+        hasDiff={
+          currentPI.d_kp !== motorConfig.current_id_pi.kp ||
+          currentPI.d_ki !== motorConfig.current_id_pi.ki ||
+          currentPI.q_kp !== motorConfig.current_iq_pi.kp ||
+          currentPI.q_ki !== motorConfig.current_iq_pi.ki
+        }
+        reload={() => setCurrentPI({
+          d_kp: motorConfig.current_id_pi.kp,
+          d_ki: motorConfig.current_id_pi.ki,
+          q_kp: motorConfig.current_iq_pi.kp,
+          q_ki: motorConfig.current_iq_pi.ki,
+        })}
         disabled={!ready}
         save={async () => {
           try {
+            if (!ready) return;
+            if (Object.values(currentPI).some((v) => !Number.isFinite(v) || v <= 0)) {
+              toast.error("电流环 PI 增益必须为有限正数");
+              return;
+            }
             await invoke("config_motor_current_pi", {
-              kp: currentSharedPI.kp,
-              ki: currentSharedPI.ki,
+              dKp: currentPI.d_kp,
+              dKi: currentPI.d_ki,
+              qKp: currentPI.q_kp,
+              qKi: currentPI.q_ki,
             });
-            // 固件同一组 kp/ki 同时写入 d/q 两轴；用函数式更新一次性替换
-            const shared = { ...currentSharedPI };
-            setMotorConfig((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    current_id_pi: { ...shared },
-                    current_iq_pi: { ...shared },
-                  }
-                : prev,
-            );
+            const raw = await invoke("get_motor_config");
+            setMotorConfig(motorConfigSchema.parse(raw));
           } catch (e) {
             toast.error(`保存失败, e: ${e}`);
           }
