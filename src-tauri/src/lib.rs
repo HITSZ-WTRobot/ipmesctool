@@ -64,6 +64,7 @@ pub fn run() {
             refresh_motor_config,
             config_motor_position_pid,
             config_motor_speed_pi,
+            config_motor_speed_sweep_current,
             config_motor_current_pi,
             config_motor_encoder,
             config_motor_id,

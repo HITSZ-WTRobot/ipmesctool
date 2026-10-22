@@ -11,7 +11,7 @@ pub struct MotorElectricalConfig {
     pub lq: f32,
 }
 
-/// 解析固件 `get_config` 的 7 行数据输出。
+/// 解析固件 `get_config` 的 8 行数据输出。
 ///
 /// 固件格式（每行 CRLF，浮点为 `%.7g` 可变位数）：
 /// ```text
@@ -20,6 +20,7 @@ pub struct MotorElectricalConfig {
 /// motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778
 /// current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275
 /// speed_pi kp=0.03703183 ki=0.8226405 outputmax=2
+/// speed_sweep iq_amplitude=0.5
 /// position_pid kp=3 ki=3 kd=0 outputmax=2000
 /// encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI
 /// ok
@@ -34,6 +35,7 @@ pub struct ConfigParser {
     /// d_kp, d_ki, q_kp, q_ki
     current_pi: Option<[f32; 4]>,
     speed_pi: Option<SpeedPIConfig>,
+    speed_sweep: Option<SpeedSweepConfig>,
     position_pid: Option<PositionPIDConfig>,
     encoder: Option<EncoderConfig>,
 }
@@ -85,6 +87,15 @@ impl ConfigParser {
                     output_max: parse_float(
                         kv(&pairs, "outputmax", "speed_pi")?,
                         "speed_pi.outputmax",
+                    )?,
+                });
+            }
+            "speed_sweep" => {
+                let pairs = kv_pairs(rest)?;
+                self.speed_sweep = Some(SpeedSweepConfig {
+                    iq_amplitude: parse_float(
+                        kv(&pairs, "iq_amplitude", "speed_sweep")?,
+                        "speed_sweep.iq_amplitude",
                     )?,
                 });
             }
@@ -145,6 +156,9 @@ impl ConfigParser {
         if self.speed_pi.is_none() {
             missing.push("speed_pi");
         }
+        if self.speed_sweep.is_none() {
+            missing.push("speed_sweep");
+        }
         if self.position_pid.is_none() {
             missing.push("position_pid");
         }
@@ -165,6 +179,7 @@ impl ConfigParser {
             motor: self.motor.clone().expect("checked above"),
             position_pid: self.position_pid.clone().expect("checked above"),
             speed_pi: self.speed_pi.clone().expect("checked above"),
+            speed_sweep: self.speed_sweep.clone().expect("checked above"),
             current_id_pi: CurrentPIConfig {
                 kp: current_pi[0],
                 ki: current_pi[1],
@@ -245,6 +260,12 @@ pub struct SpeedPIConfig {
     pub output_max: f32,
 }
 
+/// 速度环参数辨识使用的正弦 q 轴电流幅值（单位：A）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeedSweepConfig {
+    pub iq_amplitude: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CurrentPIConfig {
     pub kp: f32,
@@ -308,6 +329,7 @@ pub struct MotorConfig {
     pub motor: MotorElectricalConfig,
     pub position_pid: PositionPIDConfig,
     pub speed_pi: SpeedPIConfig,
+    pub speed_sweep: SpeedSweepConfig,
     pub current_id_pi: CurrentPIConfig,
     pub current_iq_pi: CurrentPIConfig,
     pub encoder_config: EncoderConfig,
@@ -324,6 +346,7 @@ mod tests {
         "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778",
         "current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275",
         "speed_pi kp=0.03703183 ki=0.8226405 outputmax=2",
+        "speed_sweep iq_amplitude=0.5",
         "position_pid kp=3 ki=3 kd=0 outputmax=2000",
         "encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI",
         "ok",
@@ -355,6 +378,7 @@ mod tests {
         assert!((config.speed_pi.kp - 0.03703183).abs() < 1e-10);
         assert!((config.speed_pi.ki - 0.8226405).abs() < 1e-9);
         assert!((config.speed_pi.output_max - 2.0).abs() < 1e-9);
+        assert!((config.speed_sweep.iq_amplitude - 0.5).abs() < 1e-9);
         assert!((config.position_pid.kp - 3.0).abs() < 1e-9);
         assert!((config.position_pid.ki - 3.0).abs() < 1e-9);
         assert_eq!(config.position_pid.kd, 0.0);
@@ -420,6 +444,9 @@ mod tests {
         assert!(parser
             .parse_line("speed_pi kp=1 ki=2 outputmax=NaN")
             .is_err());
+        // 缺少/非有限扫频电流幅值。
+        assert!(parser.parse_line("speed_sweep").is_err());
+        assert!(parser.parse_line("speed_sweep iq_amplitude=NaN").is_err());
         // 非法方向/类型。
         assert!(parser
             .parse_line("encoder pole_pairs=7 direction=sideways offset=0 type=MT6701_SPI")
@@ -453,7 +480,13 @@ mod tests {
         parser.parse_line("id 1").unwrap();
         parser.parse_line("motor rs=1 ld=2 lq=3").unwrap();
         let err = parser.try_into_motor_config().unwrap_err();
-        for missing in ["current_pi", "speed_pi", "position_pid", "encoder"] {
+        for missing in [
+            "current_pi",
+            "speed_pi",
+            "speed_sweep",
+            "position_pid",
+            "encoder",
+        ] {
             assert!(
                 err.contains(missing),
                 "error `{err}` should mention {missing}"

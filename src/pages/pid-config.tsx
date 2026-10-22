@@ -1,7 +1,7 @@
 import { atom, useAtom, useAtomValue } from "jotai";
 import { useEffect } from "react";
 import { motorConfigAtom, motorStateAtom } from "@/stores/motor";
-import type { CurrentPI, PositionPID, SpeedPI } from "@/motor";
+import type { CurrentPI, PositionPID, SpeedPI, SpeedSweep } from "@/motor";
 import { setPartValue, shallowEqual } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -10,6 +10,7 @@ import { PidConfigLockedCard } from "@/components/pid-config-locked-card";
 
 const speedPIAtom = atom<SpeedPI | null>(null);
 const positionPIDAtom = atom<PositionPID | null>(null);
+const speedSweepAtom = atom<SpeedSweep | null>(null);
 const currentSharedPIAtom = atom<CurrentPI | null>(null);
 
 export default function PidConfig() {
@@ -17,6 +18,7 @@ export default function PidConfig() {
   const state = useAtomValue(motorStateAtom);
   const [speedPI, setSpeedPI] = useAtom(speedPIAtom);
   const [positionPID, setPositionPID] = useAtom(positionPIDAtom);
+  const [speedSweep, setSpeedSweep] = useAtom(speedSweepAtom);
   const [currentSharedPI, setCurrentSharedPI] = useAtom(currentSharedPIAtom);
 
   // 断开/未连接时清空草稿，避免重连到另一台设备沿用旧值
@@ -24,11 +26,13 @@ export default function PidConfig() {
     if (!motorConfig) {
       setSpeedPI(null);
       setPositionPID(null);
+      setSpeedSweep(null);
       setCurrentSharedPI(null);
       return;
     }
     if (speedPI === null) setSpeedPI({ ...motorConfig.speed_pi });
     if (positionPID === null) setPositionPID({ ...motorConfig.position_pid });
+    if (speedSweep === null) setSpeedSweep({ ...motorConfig.speed_sweep });
     if (currentSharedPI === null) {
       setCurrentSharedPI({ ...motorConfig.current_id_pi });
     }
@@ -36,13 +40,15 @@ export default function PidConfig() {
     motorConfig,
     speedPI,
     positionPID,
+    speedSweep,
     currentSharedPI,
     setSpeedPI,
     setPositionPID,
+    setSpeedSweep,
     setCurrentSharedPI,
   ]);
 
-  if (!motorConfig || !speedPI || !positionPID || !currentSharedPI) {
+  if (!motorConfig || !speedPI || !positionPID || !speedSweep || !currentSharedPI) {
     return <div>电机配置未加载</div>;
   }
 
@@ -93,6 +99,30 @@ export default function PidConfig() {
               outputMax: speedPI.output_max,
             });
             setPartValue(setMotorConfig, motorConfig, "speed_pi", speedPI);
+          } catch (e) {
+            toast.error(`保存失败, e: ${e}`);
+          }
+        }}
+      />
+      <PidConfigCard
+        name="Speed Sweep Current"
+        value={speedSweep}
+        setValue={setSpeedSweep}
+        labels={{ iq_amplitude: "Iq Amplitude (A)" }}
+        hasDiff={!shallowEqual(speedSweep, motorConfig.speed_sweep)}
+        reload={() => setSpeedSweep({ ...motorConfig.speed_sweep })}
+        disabled={!ready}
+        save={async () => {
+          try {
+            await invoke("config_motor_speed_sweep_current", {
+              current: speedSweep.iq_amplitude,
+            });
+            setPartValue(
+              setMotorConfig,
+              motorConfig,
+              "speed_sweep",
+              speedSweep,
+            );
           } catch (e) {
             toast.error(`保存失败, e: ${e}`);
           }

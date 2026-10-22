@@ -93,6 +93,7 @@ pub enum MotorConfigCommand {
         ki: f32,
         output_max: f32,
     },
+    ConfigSpeedSweepCurrent(f32),
     ConfigCurrentPi {
         kp: f32,
         ki: f32,
@@ -124,6 +125,9 @@ impl MotorConfigCommand {
                 (kp.is_finite() && ki.is_finite() && output_max.is_finite())
                     .then(|| format!("config_speed_pi {kp} {ki} {output_max}\r\n"))
             }
+            MotorConfigCommand::ConfigSpeedSweepCurrent(current) => current
+                .is_finite()
+                .then(|| format!("config_speed_sweep_current {current}\r\n")),
             MotorConfigCommand::ConfigCurrentPi { kp, ki } => {
                 (kp.is_finite() && ki.is_finite())
                     .then(|| format!("config_current_pi {kp} {ki}\r\n"))
@@ -189,6 +193,19 @@ mod tests {
                 "config allowed in {state:?}"
             );
         }
+    }
+
+    #[test]
+    fn speed_sweep_current_requires_ready_and_finite_value() {
+        let cmd = MotorConfigCommand::ConfigSpeedSweepCurrent(0.5);
+        assert_eq!(
+            cmd.to_string(&MotorState::Ready).as_deref(),
+            Some("config_speed_sweep_current 0.5\r\n")
+        );
+        assert!(cmd.to_string(&MotorState::SpeedControl).is_none());
+        assert!(MotorConfigCommand::ConfigSpeedSweepCurrent(f32::NAN)
+            .to_string(&MotorState::Ready)
+            .is_none());
     }
 
     #[test]

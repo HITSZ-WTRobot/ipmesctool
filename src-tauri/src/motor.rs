@@ -114,6 +114,14 @@ fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
                 ));
             }
         }
+        MotorConfigCommand::ConfigSpeedSweepCurrent(current) => {
+            require_finite(*current, "speed_sweep_current")?;
+            if *current <= 0.0 {
+                return Err(MotorError::InvalidParameter(
+                    "speed_sweep_current must be greater than zero".to_string(),
+                ));
+            }
+        }
         MotorConfigCommand::ConfigCurrentPi { kp, ki } => {
             require_finite(*kp, "kp")?;
             require_finite(*ki, "ki")?;
@@ -512,7 +520,7 @@ impl Motor {
         Ok(())
     }
 
-    /// 读取 `get_config`（7 行数据 + ok），成功时更新配置缓存并同步状态。
+    /// 读取 `get_config`（8 行数据 + ok），成功时更新配置缓存并同步状态。
     ///
     /// 「读快照 + 提交缓存/状态」必须在同一个请求锁周期内完成，否则提交前可能被
     /// 并发的运行命令写入更新的状态，再被这份旧快照覆盖。
@@ -865,6 +873,18 @@ mod tests {
             output_max: -1.0,
         })
         .is_err());
+
+        assert!(validate_config_command(&MotorConfigCommand::ConfigSpeedSweepCurrent(0.5)).is_ok());
+        assert!(
+            validate_config_command(&MotorConfigCommand::ConfigSpeedSweepCurrent(0.0)).is_err()
+        );
+        assert!(
+            validate_config_command(&MotorConfigCommand::ConfigSpeedSweepCurrent(-0.5)).is_err()
+        );
+        assert!(
+            validate_config_command(&MotorConfigCommand::ConfigSpeedSweepCurrent(f32::NAN))
+                .is_err()
+        );
 
         assert!(
             validate_config_command(&MotorConfigCommand::ConfigCurrentPi { kp: 0.4, ki: 186.0 })

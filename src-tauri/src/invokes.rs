@@ -179,6 +179,19 @@ pub async fn config_motor_speed_pi(
 }
 
 #[tauri::command]
+pub async fn config_motor_speed_sweep_current(
+    current: f32,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    with_motor!(state, |motor| {
+        motor
+            .send_config_command(&MotorConfigCommand::ConfigSpeedSweepCurrent(current))
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
 pub async fn config_motor_current_pi(
     kp: f32,
     ki: f32,

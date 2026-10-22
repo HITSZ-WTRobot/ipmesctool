@@ -41,6 +41,13 @@ export const speedPI = z.object({
 
 export type SpeedPI = z.infer<typeof speedPI>;
 
+/** 速度环参数辨识正弦 q 轴电流幅值（A） */
+export const speedSweep = z.object({
+  iq_amplitude: z.number(),
+});
+
+export type SpeedSweep = z.infer<typeof speedSweep>;
+
 export const currentPI = z.object({
   kp: z.number(),
   ki: z.number(),
@@ -99,6 +106,7 @@ export const motorConfigSchema = z.object({
   motor: motorElectricalConfig,
   position_pid: positionPID,
   speed_pi: speedPI,
+  speed_sweep: speedSweep,
   current_id_pi: currentPI,
   current_iq_pi: currentPI,
   encoder_config: encoderConfig,
