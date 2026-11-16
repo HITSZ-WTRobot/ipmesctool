@@ -2,6 +2,16 @@
 
 基于 Tauri 2、React 和 Rust 的电机配置与调试工具，串口协议对齐 GPMD_Code 的 `APP/uart_com.cpp`。
 
+## 0.4.0 · 配置读取容错
+
+电调固件版本变化较快，`get_config` 不再要求 14 个 tag 全部存在。
+
+- 每个写入单元（PID、扫频电流、滤波/PLL、HFI、观测器、编码器、备份等）独立读回；缺 tag、缺字段或值非法只停用该单元，不再导致整次读取失败或断开串口。
+- 不填任何默认值。`state` 缺失时沿用固件异步上报或 `Unknown`，绝不伪造 `Ready`。
+- 新增 `issues`（`Missing` / `Malformed` / `OutOfRange`）与 `capabilities`（`available` / `writable` / `reason`）；前端据此禁用未上报功能并显示原因，不再整页报错。
+- 固件接受写入但目标单元无法读回确认时返回 `ConfigReadbackUnavailable`，缓存保留部分快照；前端不把未确认值当成成功。读回值越界只提示、不阻止编辑修正后的草稿。
+- `motor` 拆分为只读 `electrical`（rs/ld/lq/flux）与可写 `flux_speed`；`speed_sweep` 拆分为四个独立单元；`current_pi` 合并为 `{d_kp,d_ki,q_kp,q_ki}`。
+
 ## 0.3.4 · UART 指令同步
 
 以当前固件 `APP/uart_com.cpp` 实际分派为准，与工具原先显式支持的 19 条命令比较：新增支持 **17 条**，现共 **36 条**；原命令无删除或改名。这里比较的是工具协议契约，不推断固件的提交历史。
