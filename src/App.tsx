@@ -14,6 +14,7 @@ import {
 } from "@/components/unit.tsx";
 import DebugRunConsole from "@/components/debug-run-console.tsx";
 import { ErrorBoundary } from "@/components/error-boundary.tsx";
+import { ConfigIssuesBanner } from "@/components/config-issues-banner.tsx";
 import { useMotorDiagnostics } from "@/hooks/use-motor-diagnostics";
 
 const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
@@ -75,6 +76,7 @@ function App() {
         <AppSidebar />
         <div className="w-full h-screen flex flex-col items-center">
           <main className="w-full flex-1 min-h-0 overflow-y-scroll">
+            <ConfigIssuesBanner />
             <PersistentPages page={page} />
           </main>
           <footer className="flex flex-row w-full min-h-32 shrink-0 bg-accent gap-4 px-4">

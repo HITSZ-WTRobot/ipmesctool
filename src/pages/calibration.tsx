@@ -16,11 +16,12 @@ import {
 } from "@/components/ui/card.tsx";
 import { motorConfigSchema, type MotorState } from "@/motor.ts";
 import { FirmwareConfigCard } from "@/components/firmware-config-card";
+import { UnavailableConfigCard } from "@/components/config-unavailable-card";
 
 const FILTER_SETTINGS = [
-  { field: "speed_filter", name: "编码器速度滤波", command: "config_motor_speed_filter" },
-  { field: "current_filter", name: "电流滤波", command: "config_motor_current_filter" },
-  { field: "pll_frequency", name: "编码器速度 PLL 自然频率", command: "config_motor_speed_pll" },
+  { field: "speed_filter", capability: "speed_filter", name: "编码器速度滤波", command: "config_motor_speed_filter" },
+  { field: "current_filter", capability: "current_filter", name: "电流滤波", command: "config_motor_current_filter" },
+  { field: "speed_pll", capability: "speed_pll", name: "编码器速度 PLL 自然频率", command: "config_motor_speed_pll" },
 ] as const;
 
 const CALIBRATION_STAGES = [
@@ -55,9 +56,9 @@ export default function Calibration() {
   const setPage = useSetAtom(pageAtom);
   const [config, setConfig] = useAtom(motorConfigAtom);
   const settings = useMemo(() => config ? {
-    sweep: { iq_amplitude: config.speed_sweep.iq_amplitude },
-    flux: { speed: config.motor.flux_speed },
-    filters: FILTER_SETTINGS.map((setting) => ({ ...setting, value: { frequency: config.speed_sweep[setting.field] } })),
+    sweep: config.speed_sweep_current,
+    flux: config.flux_speed,
+    filters: FILTER_SETTINGS.map((setting) => ({ ...setting, value: config[setting.field] })),
   } : null, [config]);
   const setMotorState = useSetAtom(motorStateAtom);
   const [calibrating, setCalibrating] = useState<boolean>(false);
@@ -140,32 +141,42 @@ export default function Calibration() {
     <div className="w-full flex flex-col">
       <section className="m-4 space-y-3" aria-labelledby="calibration-settings-title">
         <h2 id="calibration-settings-title" className="font-semibold">校准参数</h2>
-        {settings ? <>
-          <FirmwareConfigCard
-            name="Speed Sweep Current"
-            description="速度环扫频的正弦 q 轴电流幅值，必须为有限正数；不是速度环 PI 输出限幅，校准过流仍会触发 Fault。仅 Ready，成功写 Flash 并读回。"
-            value={settings.sweep} labels={{ iq_amplitude: "Iq 幅值 (A)" }}
-            disabled={calibrating || state !== "Ready"} command="config_motor_speed_sweep_current"
-            args={(v) => ({ current: v.iq_amplitude })}
-            validate={(v) => Number.isFinite(v.iq_amplitude) && v.iq_amplitude > 0 ? undefined : "校准电流幅值必须为有限正数"}
-          />
-          <FirmwareConfigCard
-            name="磁链辨识速度" description="机械速度幅值 100..3000 rpm。磁链辨识会以此速度双向旋转，必须确保电机固定且可自由旋转。仅 Ready，成功写 Flash 并读回。"
-            value={settings.flux} labels={{ speed: "机械速度 (rpm)" }}
-            disabled={calibrating || state !== "Ready"} command="config_motor_flux_speed" args={(v) => v}
-            validate={(v) => Number.isFinite(v.speed) && v.speed >= 100 && v.speed <= 3000 ? undefined : "磁链辨识机械速度必须在 100..3000 rpm"}
-          />
-          {settings.filters.map(({ field, name, command, value }) => <FirmwareConfigCard
-            key={field} name={name} description="必须为有限正频率（Hz）；不接受导致固件单精度滤波或 PLL 系数溢出的数值。仅 Ready，成功写 Flash 并读回。"
-            value={value} labels={{ frequency: "频率 (Hz)" }}
-            disabled={calibrating || state !== "Ready"} command={command} args={(v) => v}
-            validate={(v) => {
-              const frequency = Math.fround(v.frequency);
-              const angular = Math.fround(Math.fround(2 * Math.PI) * frequency);
-              return frequency > 0 && Number.isFinite(field === "pll_frequency" ? Math.fround(angular * angular) : angular)
-                ? undefined : "频率必须为有限正数且不能使固件单精度系数溢出";
-            }}
-          />)}
+        {config && settings ? <>
+          {settings.sweep != null ? (
+            <FirmwareConfigCard
+              name="Speed Sweep Current"
+              description="速度环扫频的正弦 q 轴电流幅值，必须为有限正数；不是速度环 PI 输出限幅，校准过流仍会触发 Fault。仅 Ready，成功写 Flash 并读回。"
+              value={{ iq_amplitude: settings.sweep }} labels={{ iq_amplitude: "Iq 幅值 (A)" }}
+              disabled={calibrating || state !== "Ready"} command="config_motor_speed_sweep_current"
+              args={(v) => ({ current: v.iq_amplitude })}
+              validate={(v) => Number.isFinite(v.iq_amplitude) && v.iq_amplitude > 0 ? undefined : "校准电流幅值必须为有限正数"}
+            />
+          ) : (
+            <UnavailableConfigCard name="Speed Sweep Current" reason={config.capabilities.speed_sweep_current.reason} />
+          )}
+          {settings.flux != null ? (
+            <FirmwareConfigCard
+              name="磁链辨识速度" description="机械速度幅值 100..3000 rpm。磁链辨识会以此速度双向旋转，必须确保电机固定且可自由旋转。仅 Ready，成功写 Flash 并读回。"
+              value={{ speed: settings.flux }} labels={{ speed: "机械速度 (rpm)" }}
+              disabled={calibrating || state !== "Ready"} command="config_motor_flux_speed" args={(v) => v}
+              validate={(v) => Number.isFinite(v.speed) && v.speed >= 100 && v.speed <= 3000 ? undefined : "磁链辨识机械速度必须在 100..3000 rpm"}
+            />
+          ) : (
+            <UnavailableConfigCard name="磁链辨识速度" reason={config.capabilities.flux_speed.reason} />
+          )}
+          {settings.filters.map(({ field, capability, name, command, value }) =>
+            value != null ? <FirmwareConfigCard
+              key={field} name={name} description="必须为有限正频率（Hz）；不接受导致固件单精度滤波或 PLL 系数溢出的数值。仅 Ready，成功写 Flash 并读回。"
+              value={{ frequency: value }} labels={{ frequency: "频率 (Hz)" }}
+              disabled={calibrating || state !== "Ready"} command={command} args={(v) => v}
+              validate={(v) => {
+                const frequency = Math.fround(v.frequency);
+                const angular = Math.fround(Math.fround(2 * Math.PI) * frequency);
+                return frequency > 0 && Number.isFinite(field === "speed_pll" ? Math.fround(angular * angular) : angular)
+                  ? undefined : "频率必须为有限正数且不能使固件单精度系数溢出";
+              }}
+            /> : <UnavailableConfigCard key={field} name={name} reason={config.capabilities[capability].reason} />
+          )}
         </> : <p className="text-sm text-muted-foreground">电机配置未加载</p>}
       </section>
       <Card className="m-4">

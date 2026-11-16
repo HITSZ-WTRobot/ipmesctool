@@ -3,6 +3,7 @@ import { useAtomValue, useStore } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { FirmwareConfigCard } from "@/components/firmware-config-card";
+import { UnavailableConfigCard } from "@/components/config-unavailable-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -10,8 +11,8 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  HFI_STATE_LABELS, RUNNING_STATES, describeFault, hfiConfigSchema,
-  motorConfigSchema, observerFluxSchema, transitionSchema,
+  HFI_STATE_LABELS, RUNNING_STATES, describeFault, hfiConfigDraft,
+  motorConfigSchema, observerFluxDraft, transitionDraft,
 } from "@/motor";
 import { motorConfigAtom, motorConnectedAtom, motorDiagnosticsAtom, motorStateAtom } from "@/stores/motor";
 import { telemetryNativeSessionIdAtom } from "@/stores/telemetry";
@@ -56,41 +57,60 @@ export default function ObserverConfig() {
       setAction(null);
     }
   };
-  if (!config || !connected) return <div>电机配置未加载</div>;
+  if (!connected) return <div>电机未连接</div>;
+  if (!config) return <div>电机配置未加载</div>;
+
+  const backup = config.backup;
+  const hfiCapability = config.capabilities.hfi;
+  const observerFluxCapability = config.capabilities.observer_flux;
+  const transitionCapability = config.capabilities.transition;
+
   return <div className="w-full p-4 space-y-4">
     <Card>
       <CardHeader><CardTitle className="text-base">观测器运行时状态</CardTitle></CardHeader>
       <CardContent className="text-sm space-y-3">
         <p>故障旗标：<span className="font-mono">{describeFault(diagnostics?.fault ?? config.fault)}</span></p>
         <p>HFI：<span className="font-mono">{diagnostics?.hfiState == null ? "尚未收到状态" : HFI_STATE_LABELS[diagnostics.hfiState]}</span></p>
-        <p>运行时备份：{config.backup.enabled ? "已启用" : "已禁用"}（不写 Flash，重启后以固件读回为准）</p>
+        <p>运行时备份：{backup == null ? "固件未上报" : backup.enabled ? "已启用" : "已禁用"}（不写 Flash，重启后以固件读回为准）</p>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" disabled={!ready || pending} onClick={() => setAction(config.backup.enabled ? "backup_disable" : "backup_enable")}>{config.backup.enabled ? "禁用" : "启用"}运行时备份</Button>
+          <Button variant="outline" disabled={!ready || pending || backup == null} onClick={() => setAction(backup?.enabled ? "backup_disable" : "backup_enable")}>{backup?.enabled ? "禁用" : "启用"}运行时备份</Button>
           <Button disabled={!connected || !RUNNING_STATES.includes(state) || pending} onClick={() => setAction("hfi_enable")}>请求启用 HFI</Button>
           <Button variant="outline" disabled={!connected || pending} onClick={() => setAction("hfi_disable")}>禁用 HFI</Button>
         </div>
         <p className="text-muted-foreground">备份开关仅 Ready 可改；启用 HFI 仅允许 CurrentControl / SpeedControl / PositionControl，禁用允许任意连接状态。备份及注入电压有效性由固件判定；命令确认不等于 HFI 收敛。</p>
       </CardContent>
     </Card>
-    <FirmwareConfigCard
-      name="HFI 高频注入" description="注入电压 ≥ 0 V；电流与速度滤波频率必须在 (0, 2500) Hz；PLL Kp/Ki > 0。仅 Ready，成功写 Flash 并读回。"
-      value={config.hfi} labels={{ voltage: "注入电压 (V)", current_filter: "电流滤波 (Hz)", kp: "PLL Kp", ki: "PLL Ki", speed_filter: "速度滤波 (Hz)" }}
-      disabled={!ready || pending} command="config_motor_hfi"
-      args={(v) => ({ voltage: v.voltage, currentFilter: v.current_filter, kp: v.kp, ki: v.ki, speedFilter: v.speed_filter })}
-      validate={(v) => hfiConfigSchema.safeParse(v).success ? undefined : "HFI 参数必须有限：电压 ≥ 0，Kp/Ki > 0，两项滤波频率 0 < Hz < 2500"}
-    />
-    <FirmwareConfigCard
-      name="磁链观测器" description="Gamma ∈ (0, 10¹²]；PLL Kp ∈ (0, 10⁶]、Ki ∈ (0, 10⁸]。仅 Ready，成功写 Flash 并读回。"
-      value={config.observer_flux} labels={{ gamma: "Gamma", kp: "PLL Kp", ki: "PLL Ki" }} disabled={!ready || pending}
-      command="config_motor_observer_flux" args={(v) => v}
-      validate={(v) => observerFluxSchema.safeParse(v).success ? undefined : "磁链观测器参数必须有限且满足 Gamma/Kp/Ki 的标示范围"}
-    />
-    <FirmwareConfigCard
-      name="观测器过渡区" description="单位是电气 rpm（非机械 rpm），必须满足 0 ≤ Low < High ≤ 1000000。仅 Ready，成功写 Flash 并读回。"
-      value={config.transition} labels={{ low: "Low (电气 rpm)", high: "High (电气 rpm)" }} disabled={!ready || pending}
-      command="config_motor_observer_transition" args={(v) => v}
-      validate={(v) => transitionSchema.safeParse(v).success ? undefined : "过渡区必须为有限数，且 0 ≤ Low < High ≤ 1000000 电气 rpm"}
-    />
+    {config.hfi ? (
+      <FirmwareConfigCard
+        name="HFI 高频注入" description="注入电压 ≥ 0 V；电流与速度滤波频率必须在 (0, 2500) Hz；PLL Kp/Ki > 0。仅 Ready，成功写 Flash 并读回。"
+        value={config.hfi} labels={{ voltage: "注入电压 (V)", current_filter: "电流滤波 (Hz)", kp: "PLL Kp", ki: "PLL Ki", speed_filter: "速度滤波 (Hz)" }}
+        disabled={!ready || pending} command="config_motor_hfi"
+        args={(v) => ({ voltage: v.voltage, currentFilter: v.current_filter, kp: v.kp, ki: v.ki, speedFilter: v.speed_filter })}
+        validate={(v) => hfiConfigDraft.safeParse(v).success ? undefined : "HFI 参数必须有限：电压 ≥ 0，Kp/Ki > 0，两项滤波频率 0 < Hz < 2500"}
+      />
+    ) : (
+      <UnavailableConfigCard name="HFI 高频注入" reason={hfiCapability.reason} />
+    )}
+    {config.observer_flux ? (
+      <FirmwareConfigCard
+        name="磁链观测器" description="Gamma ∈ (0, 10¹²]；PLL Kp ∈ (0, 10⁶]、Ki ∈ (0, 10⁸]。仅 Ready，成功写 Flash 并读回。"
+        value={config.observer_flux} labels={{ gamma: "Gamma", kp: "PLL Kp", ki: "PLL Ki" }} disabled={!ready || pending}
+        command="config_motor_observer_flux" args={(v) => v}
+        validate={(v) => observerFluxDraft.safeParse(v).success ? undefined : "磁链观测器参数必须有限且满足 Gamma/Kp/Ki 的标示范围"}
+      />
+    ) : (
+      <UnavailableConfigCard name="磁链观测器" reason={observerFluxCapability.reason} />
+    )}
+    {config.transition ? (
+      <FirmwareConfigCard
+        name="观测器过渡区" description="单位是电气 rpm（非机械 rpm），必须满足 0 ≤ Low < High ≤ 1000000。仅 Ready，成功写 Flash 并读回。"
+        value={config.transition} labels={{ low: "Low (电气 rpm)", high: "High (电气 rpm)" }} disabled={!ready || pending}
+        command="config_motor_observer_transition" args={(v) => v}
+        validate={(v) => transitionDraft.safeParse(v).success ? undefined : "过渡区必须为有限数，且 0 ≤ Low < High ≤ 1000000 电气 rpm"}
+      />
+    ) : (
+      <UnavailableConfigCard name="观测器过渡区" reason={transitionCapability.reason} />
+    )}
     <AlertDialog open={action !== null} onOpenChange={(open) => { if (!open) setAction(null); }}>
       <AlertDialogContent>
         <AlertDialogHeader>

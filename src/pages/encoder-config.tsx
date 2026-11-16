@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/select.tsx";
 import { AngleUnit, useAngleConverter } from "@/components/unit.tsx";
 import { useDegAtom } from "@/stores/angle.ts";
+import { UnavailableConfigCard } from "@/components/config-unavailable-card";
 import { invoke } from "@tauri-apps/api/core";
 
 const encoderConfigAtom = atom<EncoderConfigType | null>(null);
@@ -43,13 +44,15 @@ export default function EncoderConfig() {
   const ready = state === "Ready";
 
   const refresh = useCallback(() => {
-    if (!motorConfig) return;
+    const saved = motorConfig?.encoder_config;
+    if (!saved) {
+      setEncoderConfig(null);
+      return;
+    }
     // 读取 encoder config，角度按当前显示单位换算
     setEncoderConfig({
-      ...motorConfig.encoder_config,
-      encoder_offset: useDeg
-        ? rad2deg(motorConfig.encoder_config.encoder_offset)
-        : motorConfig.encoder_config.encoder_offset,
+      ...saved,
+      encoder_offset: useDeg ? rad2deg(saved.encoder_offset) : saved.encoder_offset,
     });
   }, [motorConfig, setEncoderConfig, useDeg]);
 
@@ -66,8 +69,18 @@ export default function EncoderConfig() {
       setPartValue(setEncoderConfig, encoderConfig, "encoder_offset", v),
   });
 
-  if (!motorConfig || !encoderConfig) {
+  if (!motorConfig) {
     return <div>电机配置未加载</div>;
+  }
+  if (!encoderConfig) {
+    return (
+      <div className="w-full p-4">
+        <UnavailableConfigCard
+          name="编码器配置"
+          reason={motorConfig.capabilities.encoder_config.reason}
+        />
+      </div>
+    );
   }
 
   const save = async () => {

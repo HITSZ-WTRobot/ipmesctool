@@ -29,13 +29,13 @@ export function MotorState() {
       <div className="w-full border rounded-md px-3 py-2 flex flex-col gap-1">
         <div className="flex items-center">
           <span className="text-muted-foreground w-20">ID</span>
-          <span className="font-medium">{motorConfig.id}</span>
+          <span className="font-medium">{motorConfig.id ?? "未上报"}</span>
         </div>
 
         <div className="flex items-center">
           <span className="text-muted-foreground w-20">Encoder</span>
           <span className="font-medium">
-            {motorConfig.encoder_config.encoder_type}
+            {motorConfig.encoder_config?.encoder_type ?? "未上报"}
           </span>
         </div>
       </div>

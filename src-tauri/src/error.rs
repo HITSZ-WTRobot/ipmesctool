@@ -16,6 +16,10 @@ pub enum MotorError {
     /// 固件已接受命令（收到 `ok`），但随后读回确认配置失败。
     #[error("command accepted but config refresh failed: {0}")]
     ConfigRefreshFailed(String),
+    /// 固件已接受命令（收到 `ok`），但该版本没有上报对应配置项，
+    /// 无法确认写入结果；缓存已更新为部分快照。
+    #[error("command accepted but readback is unavailable: {0}")]
+    ConfigReadbackUnavailable(String),
     #[error("calibration failed: {0}")]
     CalibrationError(String),
     #[error("timeout")]

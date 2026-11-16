@@ -2,7 +2,7 @@ use crate::calibration_parser::{CalibrationParser, CalibrationState, Calibration
 use crate::command::{
     MotorCalibrationCommand, MotorConfigCommand, MotorRunCommand, MotorState, MAX_MOTOR_ID,
 };
-use crate::config_parser::{ConfigParser, MotorConfig};
+use crate::config_parser::{Capability, ConfigParser, MotorConfig};
 use crate::error::MotorError;
 use crate::exit_signal::ExitSignal;
 use crate::serial::{SerialDevice, TELEMETRY_CAPACITY};
@@ -105,7 +105,9 @@ fn require_finite(value: f32, name: &str) -> Result<(), MotorError> {
 }
 
 /// 按固件 setter 的实际取值范围校验配置参数（uart_com.cpp + motor.cpp）。
-fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
+///
+/// 读回能力表（`config_parser::Capabilities`）复用同一份校验，避免范围规则分叉。
+pub(crate) fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
     match cmd {
         MotorConfigCommand::ConfigPositionPid {
             kp,
@@ -222,6 +224,61 @@ fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
         }
     }
     Ok(())
+}
+
+/// 把写命令映射到快照中的读回能力单元；用于确认写入是否被读回证实。
+fn capability_for_command<'a>(
+    config: &'a MotorConfig,
+    cmd: &MotorConfigCommand,
+) -> (&'static str, &'a Capability) {
+    match cmd {
+        MotorConfigCommand::ConfigPositionPid { .. } => {
+            ("position_pid", &config.capabilities.position_pid)
+        }
+        MotorConfigCommand::ConfigSpeedPi { .. } => ("speed_pi", &config.capabilities.speed_pi),
+        MotorConfigCommand::ConfigSpeedSweepCurrent(_) => (
+            "speed_sweep_current",
+            &config.capabilities.speed_sweep_current,
+        ),
+        MotorConfigCommand::ConfigCurrentLimit(_) => {
+            ("current_limit", &config.capabilities.current_limit)
+        }
+        MotorConfigCommand::ConfigCurrentPi { .. } => ("current_pi", &config.capabilities.current_pi),
+        MotorConfigCommand::ConfigEncoder { .. } => {
+            ("encoder_config", &config.capabilities.encoder_config)
+        }
+        MotorConfigCommand::ConfigId(_) => ("motor_id", &config.capabilities.motor_id),
+        MotorConfigCommand::ConfigFluxSpeed(_) => ("flux_speed", &config.capabilities.flux_speed),
+        MotorConfigCommand::ConfigSpeedFilter(_) => {
+            ("speed_filter", &config.capabilities.speed_filter)
+        }
+        MotorConfigCommand::ConfigCurrentFilter(_) => {
+            ("current_filter", &config.capabilities.current_filter)
+        }
+        MotorConfigCommand::ConfigSpeedPll(_) => ("speed_pll", &config.capabilities.speed_pll),
+        MotorConfigCommand::ConfigHfi { .. } => ("hfi", &config.capabilities.hfi),
+        MotorConfigCommand::ConfigObserverFlux { .. } => {
+            ("observer_flux", &config.capabilities.observer_flux)
+        }
+        MotorConfigCommand::ConfigObserverTransition { .. } => {
+            ("transition", &config.capabilities.transition)
+        }
+        MotorConfigCommand::ConfigBackup(_) => ("backup", &config.capabilities.backup),
+    }
+}
+
+/// 写入被固件接受后的读回确认：只有目标单元被读回且仍可写才算成功。
+fn confirm_write(snapshot: &MotorConfig, cmd: &MotorConfigCommand) -> Result<(), MotorError> {
+    let (unit, capability) = capability_for_command(snapshot, cmd);
+    if capability.writable {
+        return Ok(());
+    }
+    Err(MotorError::ConfigReadbackUnavailable(
+        capability
+            .reason
+            .clone()
+            .unwrap_or_else(|| format!("{unit}: firmware did not confirm the written value")),
+    ))
 }
 
 fn prepare_config_command(
@@ -522,8 +579,10 @@ impl Motor {
         let mut config = self.motor_config.lock().await;
         let mut previous = self.diagnostics.lock().await;
         let (reported_fault, hfi_state) = self.serial.diagnostics();
-        let fault = reported_fault.or_else(|| config.as_ref().map(|c| c.fault)).unwrap_or(previous.0);
-        if let Some(config) = config.as_mut() { config.fault = fault; }
+        let fault = reported_fault
+            .or_else(|| config.as_ref().and_then(|c| c.fault))
+            .unwrap_or(previous.0);
+        if let Some(config) = config.as_mut() { config.fault = Some(fault); }
         let diagnostics = MotorDiagnostics { session_id: self.session_id.clone(), fault, hfi_state };
         if *previous != (fault, hfi_state) {
             *previous = (fault, hfi_state);
@@ -551,7 +610,7 @@ impl Motor {
         *current = next;
         drop(current);
         if let Some(config) = self.motor_config.lock().await.as_mut() {
-            config.state = next;
+            config.state = Some(next);
         }
         if changed { self.emit_state(next); }
     }
@@ -741,7 +800,8 @@ impl Motor {
         Ok(())
     }
 
-    /// 读取 `get_config`（14 个必需数据 tag + ok），成功时同步配置、状态与诊断。
+    /// 读取 `get_config`：只有传输/`ok` 边界失败才是错误；字段缺失只会让对应
+    /// 单元不可用并记录 issue，成功时同步配置、状态与诊断。
     ///
     /// 「读快照 + 提交缓存/状态」必须在同一个请求锁周期内完成，否则提交前可能被
     /// 并发的运行命令写入更新的状态，再被这份旧快照覆盖。
@@ -749,41 +809,51 @@ impl Motor {
         let _guard = self.request_lock.lock().await;
 
         let mut parser = ConfigParser::default();
-        let mut parse_error: Option<String> = None;
-
         self.transact_locked(
             COMMAND_TIMEOUT,
             |_state| Ok((GET_CONFIG_COMMAND.to_string(), None)),
             |line| {
-                // 记录首个错误但继续读到 ack，保证写入与回包不错位。
-                if parse_error.is_none() {
-                    if let Err(e) = parser.parse_line(line) {
-                        parse_error = Some(e);
-                    }
-                }
+                // 容错解析：缺失/非法字段只记录 issue，继续读到 ack 保持回包对齐。
+                parser.parse_line(line);
                 Ok(())
             },
         )
         .await?;
 
-        if let Some(e) = parse_error {
-            return Err(MotorError::ParseError(e));
+        // 至少要识别到一行已知配置，避免把其它串口设备当作电调。
+        if !parser.has_known_rows() {
+            return Err(MotorError::ParseError(
+                "device returned no known GPMD config row".to_string(),
+            ));
         }
-        let mut config = parser
-            .try_into_motor_config()
-            .map_err(MotorError::ParseError)?;
+        let mut config = parser.into_motor_config();
+        for issue in &config.issues {
+            warn!(
+                "config readback {} ({}): {}",
+                issue.field,
+                match issue.kind {
+                    crate::config_parser::ConfigIssueKind::Missing => "missing",
+                    crate::config_parser::ConfigIssueKind::Malformed => "malformed",
+                    crate::config_parser::ConfigIssueKind::OutOfRange => "out-of-range",
+                },
+                issue.message
+            );
+        }
         {
             let mut cached = self.motor_config.lock().await;
             // Reports can arrive after the snapshot row but before its ack. Never overwrite
             // a newer fault report with the earlier get_config value.
-            if let (Some(fault), _) = self.serial.diagnostics() { config.fault = fault; }
+            if let Some(fault) = self.serial.diagnostics().0 { config.fault = Some(fault); }
             *cached = Some(config.clone());
         }
         self.get_diagnostics().await;
         // 固件上报的状态是权威值：任何成功的 get_config（含 raw / 校准后刷新）都同步状态。
-        self.set_state(config.state).await;
-        config.state = *self.state.lock().await;
-        config.fault = self.serial.diagnostics().0.unwrap_or(config.fault);
+        match config.state {
+            Some(state) => self.set_state(state).await,
+            None => self.sync_reported_state().await,
+        }
+        config.state = Some(*self.state.lock().await);
+        config.fault = self.serial.diagnostics().0.or(config.fault);
         Ok(config)
     }
 
@@ -805,7 +875,12 @@ impl Motor {
         self.load_config().await
     }
 
-    /// 写配置命令：仅 Ready 可用，收到 ok 后按固件确认值刷新缓存。
+    /// 写配置命令：仅 Ready 可用，收到 ok 后读回确认。
+    ///
+    /// - 目标单元被读回且值在可写范围：成功。
+    /// - `get_config` 传输失败：`ConfigRefreshFailed`，缓存失效。
+    /// - 固件接受写入但该版本未上报目标单元（或读回值不可写）：
+    ///   `ConfigReadbackUnavailable`，缓存保留为部分快照，不声称确认成功。
     pub async fn send_config_command(
         self: &Arc<Self>,
         config_cmd: &MotorConfigCommand,
@@ -816,11 +891,11 @@ impl Motor {
             |_| Ok(()),
         )
         .await?;
-        // 写入已被固件接受；读回失败必须显式报错并失效缓存，不能当作成功。
-        self.refresh_config_cache()
+        let snapshot = self
+            .refresh_config_cache()
             .await
             .map_err(|e| MotorError::ConfigRefreshFailed(e.to_string()))?;
-        Ok(())
+        confirm_write(&snapshot, config_cmd)
     }
 
     pub async fn set_hfi_enabled(self: &Arc<Self>, enabled: bool) -> Result<(), MotorError> {
@@ -1157,6 +1232,37 @@ mod tests {
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID)).is_ok());
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(MAX_MOTOR_ID + 1)).is_err());
         assert!(validate_config_command(&MotorConfigCommand::ConfigId(u32::MAX)).is_err());
+    }
+
+    /// 固件接受写入后：目标单元缺失或读回值不可写都不得声称确认成功。
+    #[test]
+    fn write_confirmation_requires_a_writable_target_unit() {
+        let mut parser = ConfigParser::default();
+        parser.parse_line("speed_pi kp=0.03 ki=0.8 outputmax=2");
+        parser.parse_line("motor rs=0.1 ld=0.1 lq=0.1 flux=0.003 flux_speed=5000");
+        let snapshot = parser.into_motor_config();
+
+        let speed_pi = MotorConfigCommand::ConfigSpeedPi { kp: 0.03, ki: 0.8, output_max: 2.0 };
+        assert!(confirm_write(&snapshot, &speed_pi).is_ok());
+
+        // 该版本没有上报 HFI：写入已接受，但无法读回确认。
+        let hfi = MotorConfigCommand::ConfigHfi {
+            voltage: 0.0,
+            current_filter: 100.0,
+            kp: 1.0,
+            ki: 2.0,
+            speed_filter: 50.0,
+        };
+        assert!(matches!(
+            confirm_write(&snapshot, &hfi),
+            Err(MotorError::ConfigReadbackUnavailable(_))
+        ));
+
+        // 读回值超出可写范围：显示可用，但写入不可确认。
+        assert!(matches!(
+            confirm_write(&snapshot, &MotorConfigCommand::ConfigFluxSpeed(5000.0)),
+            Err(MotorError::ConfigReadbackUnavailable(_))
+        ));
     }
 
     #[test]
