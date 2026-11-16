@@ -1,6 +1,6 @@
 import { atom, useAtom, useAtomValue } from "jotai";
 import { useEffect } from "react";
-import { motorConfigAtom, motorStateAtom } from "@/stores/motor.ts";
+import { motorConfigAtom, motorDiagnosticsAtom, motorStateAtom } from "@/stores/motor.ts";
 import {
   Card,
   CardContent,
@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { IdInput } from "@/components/id-input.tsx";
 import { PidConfigCard } from "@/components/pid-config-card";
-import { motorConfigSchema, type CurrentProtection } from "@/motor";
+import { describeFault, HFI_STATE_LABELS, motorConfigSchema, type CurrentProtection } from "@/motor";
 
 const protectionAtom = atom<CurrentProtection | null>(null);
 
@@ -28,6 +28,7 @@ function ReadOnlyRow({ label, value }: { label: string; value: string }) {
 export default function DeviceInfo() {
   const [config, setConfig] = useAtom(motorConfigAtom);
   const state = useAtomValue(motorStateAtom);
+  const diagnostics = useAtomValue(motorDiagnosticsAtom);
   const [protection, setProtection] = useAtom(protectionAtom);
   const ready = state === "Ready";
 
@@ -57,6 +58,10 @@ export default function DeviceInfo() {
           <ReadOnlyRow label="Rs" value={`${config.motor.rs} Ω`} />
           <ReadOnlyRow label="Ld" value={`${config.motor.ld} H`} />
           <ReadOnlyRow label="Lq" value={`${config.motor.lq} H`} />
+          <ReadOnlyRow label="永磁磁链" value={`${config.motor.flux} Wb`} />
+          <ReadOnlyRow label="辨识速度" value={`${config.motor.flux_speed} 机械 rpm`} />
+          <ReadOnlyRow label="Fault" value={describeFault(diagnostics?.fault ?? config.fault)} />
+          <ReadOnlyRow label="HFI" value={diagnostics?.hfiState == null ? "尚未收到状态" : HFI_STATE_LABELS[diagnostics.hfiState]} />
           <ReadOnlyRow label="State" value={state} />
         </CardContent>
       </Card>
@@ -88,10 +93,9 @@ export default function DeviceInfo() {
         />
       )}
       <p className="text-xs text-muted-foreground px-1">
-        Rs / Ld / Lq 由校准识别，UART 未提供直接写入命令。所有配置命令写入成功后
-        会自动保存到 Flash，无需手动保存。UART CLI 支持 get_iabc（三相电流）、
-        get_idq（d/q 轴电流）、get_speed（速度）、get_position（位置）实时流，
-        get_none 停止输出；可在波形页查看。
+        Rs / Ld / Lq / 永磁磁链（Wb）由校准识别，辨识速度在校准页设置。
+        持久配置写入成功后由固件保存 Flash；观测器页的备份开关仅影响运行时，不写 Flash。
+        波形页支持相电流、d/q 电流、机械速度/位置、电角度与观测器电角度/电气速度共七种实时流，get_none 停止输出。
       </p>
     </div>
   ) : (

@@ -4,10 +4,11 @@ import type { EventCallback, UnlistenFn } from "@tauri-apps/api/event";
 import { atom, useStore } from "jotai";
 import { useEffect } from "react";
 import { TelemetryHistory } from "@/lib/telemetry-history.ts";
+import { STREAM_MODES } from "@/lib/telemetry-modes.ts";
 import { motorConnectedAtom } from "@/stores/motor.ts";
 import { appendSerialDataAtom } from "@/stores/serial.ts";
 
-export type StreamMode = "iabc" | "idq" | "speed" | "position";
+export type StreamMode = "iabc" | "idq" | "speed" | "position" | "angle" | "observer_pos" | "observer_speed";
 export type TelemetryMode = "none" | StreamMode;
 export interface TelemetrySample {
   mode: StreamMode;
@@ -26,12 +27,14 @@ interface TelemetryBatch {
 }
 export type TelemetryHistories = Record<StreamMode, TelemetryHistory>;
 export type TelemetryRetentionSeconds = 60 | 300 | 600 | 900;
-const streamModes: readonly StreamMode[] = ["iabc", "idq", "speed", "position"];
 const emptyHistories = (): TelemetryHistories => ({
   iabc: new TelemetryHistory(),
   idq: new TelemetryHistory(),
   speed: new TelemetryHistory(),
   position: new TelemetryHistory(),
+  angle: new TelemetryHistory(),
+  observer_pos: new TelemetryHistory(),
+  observer_speed: new TelemetryHistory(),
 });
 
 export const telemetryModeAtom = atom<TelemetryMode>("none");
@@ -54,7 +57,7 @@ export const telemetryRetentionSecondsAtom = atom(
     const latestTime = get(latestTelemetryTimeAtom);
     if (seconds < previous && latestTime !== undefined) {
       const histories = get(telemetryHistoriesAtom);
-      for (const mode of streamModes) histories[mode].trimBefore(latestTime - seconds);
+      for (const mode of STREAM_MODES) histories[mode].trimBefore(latestTime - seconds);
       set(telemetryHistoriesAtom, { ...histories });
     }
   },
@@ -76,7 +79,9 @@ const syncTelemetryConnectionAtom = atom(null, (get, set) => {
 });
 const appendTelemetryAtom = atom(null, (get, set, batch: TelemetrySample[]) => {
   if (!get(motorConnectedAtom) || batch.length === 0) return;
-  const grouped: Record<StreamMode, TelemetrySample[]> = { iabc: [], idq: [], speed: [], position: [] };
+  const grouped: Record<StreamMode, TelemetrySample[]> = {
+    iabc: [], idq: [], speed: [], position: [], angle: [], observer_pos: [], observer_speed: [],
+  };
   let latestTime = get(latestTelemetryTimeAtom);
   for (const sample of batch) {
     grouped[sample.mode].push(sample);
@@ -84,7 +89,7 @@ const appendTelemetryAtom = atom(null, (get, set, batch: TelemetrySample[]) => {
   }
   const histories = get(telemetryHistoriesAtom);
   const cutoff = latestTime! - get(retentionSecondsAtom);
-  for (const mode of streamModes) {
+  for (const mode of STREAM_MODES) {
     histories[mode].append(grouped[mode]);
     histories[mode].trimBefore(cutoff);
   }

@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "ipmesctool"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "log",
  "parking_lot",

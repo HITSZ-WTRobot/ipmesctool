@@ -1,7 +1,7 @@
 use crate::calibration_parser::CalibrationState;
 use crate::command::{MotorConfigCommand, MotorRunCommand};
 use crate::config_parser::{EncoderDirection, EncoderType, MotorConfig};
-use crate::motor::{Motor, TelemetryState};
+use crate::motor::{Motor, MotorDiagnostics, TelemetryState};
 use crate::serial::SerialDevice;
 use crate::telemetry::TelemetryMode;
 use std::sync::Arc;
@@ -140,6 +140,79 @@ pub async fn refresh_motor_config(
         .load_config()
         .await
         .map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn get_motor_diagnostics(state: tauri::State<'_, AppState>) -> Result<MotorDiagnostics, String> {
+    with_motor!(state, |motor| Ok(motor.get_diagnostics().await))
+}
+
+#[tauri::command]
+pub async fn config_motor_flux_speed(speed: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigFluxSpeed(speed)).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_speed_filter(frequency: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigSpeedFilter(frequency)).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_current_filter(frequency: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigCurrentFilter(frequency)).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_speed_pll(frequency: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigSpeedPll(frequency)).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_hfi(voltage: f32, current_filter: f32, kp: f32, ki: f32, speed_filter: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigHfi { voltage, current_filter, kp, ki, speed_filter }).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_observer_flux(gamma: f32, kp: f32, ki: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigObserverFlux { gamma, kp, ki }).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_observer_transition(low: f32, high: f32, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigObserverTransition { low, high }).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn config_motor_backup(enabled: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.send_config_command(&MotorConfigCommand::ConfigBackup(enabled)).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn motor_hfi_enable(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.set_hfi_enabled(true).await.map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
+pub async fn motor_hfi_disable(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| motor.set_hfi_enabled(false).await.map_err(|e| e.to_string()))
+}
+
+async fn release_disconnected_motor(state: &AppState, motor: &Arc<Motor>) {
+    if !motor.serial.connected.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut current = state.motor.lock().await;
+        if current.as_ref().is_some_and(|active| Arc::ptr_eq(active, motor)) {
+            current.take();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn motor_iap(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    with_motor!(state, |motor| {
+        let result = motor.iap().await.map_err(|e| e.to_string());
+        release_disconnected_motor(&state, &motor).await;
+        result
+    })
 }
 
 #[tauri::command]
@@ -317,8 +390,9 @@ pub async fn send_serial_command(
     command: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    with_motor!(state, |motor| motor
-        .send_raw_command(&command)
-        .await
-        .map_err(|e| e.to_string()))
+    with_motor!(state, |motor| {
+        let result = motor.send_raw_command(&command).await.map_err(|e| e.to_string());
+        release_disconnected_motor(&state, &motor).await;
+        result
+    })
 }

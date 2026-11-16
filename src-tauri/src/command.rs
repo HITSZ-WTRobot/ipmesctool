@@ -80,7 +80,7 @@ impl MotorRunCommand {
 /// 因此写命令必须在此范围内；读回（`get_config` 的 `id`）仍是完整 uint32。
 pub const MAX_MOTOR_ID: u32 = 0x7FF;
 
-/// 配置写命令（固件会自动保存，无独立 save 命令）。
+/// 配置写命令；除运行时 backup 开关外，固件自动保存配置。
 pub enum MotorConfigCommand {
     ConfigPositionPid {
         kp: f32,
@@ -108,6 +108,14 @@ pub enum MotorConfigCommand {
         encoder_type: EncoderType,
     },
     ConfigId(u32),
+    ConfigFluxSpeed(f32),
+    ConfigSpeedFilter(f32),
+    ConfigCurrentFilter(f32),
+    ConfigSpeedPll(f32),
+    ConfigHfi { voltage: f32, current_filter: f32, kp: f32, ki: f32, speed_filter: f32 },
+    ConfigObserverFlux { gamma: f32, kp: f32, ki: f32 },
+    ConfigObserverTransition { low: f32, high: f32 },
+    ConfigBackup(bool),
 }
 
 impl MotorConfigCommand {
@@ -162,8 +170,44 @@ impl MotorConfigCommand {
             MotorConfigCommand::ConfigId(id) => {
                 (*id <= MAX_MOTOR_ID).then(|| format!("config_id {id}\r\n"))
             }
+            MotorConfigCommand::ConfigFluxSpeed(speed) =>
+                (speed.is_finite() && (100.0..=3000.0).contains(speed))
+                    .then(|| format!("config_flux_speed {speed}\r\n")),
+            MotorConfigCommand::ConfigSpeedFilter(frequency) => valid_filter(*frequency)
+                .then(|| format!("config_speed_filter {frequency}\r\n")),
+            MotorConfigCommand::ConfigCurrentFilter(frequency) => valid_filter(*frequency)
+                .then(|| format!("config_current_filter {frequency}\r\n")),
+            MotorConfigCommand::ConfigSpeedPll(frequency) => valid_pll(*frequency)
+                .then(|| format!("config_speed_pll {frequency}\r\n")),
+            MotorConfigCommand::ConfigHfi { voltage, current_filter, kp, ki, speed_filter } =>
+                (voltage.is_finite() && *voltage >= 0.0 && positive(*kp) && positive(*ki)
+                    && positive(*current_filter) && *current_filter < 2500.0
+                    && positive(*speed_filter) && *speed_filter < 2500.0)
+                    .then(|| format!("config_hfi {voltage} {current_filter} {kp} {ki} {speed_filter}\r\n")),
+            MotorConfigCommand::ConfigObserverFlux { gamma, kp, ki } =>
+                (positive(*gamma) && *gamma <= 1.0e12 && positive(*kp) && *kp <= 1.0e6
+                    && positive(*ki) && *ki <= 1.0e8)
+                    .then(|| format!("config_observer_flux {gamma} {kp} {ki}\r\n")),
+            MotorConfigCommand::ConfigObserverTransition { low, high } =>
+                (low.is_finite() && high.is_finite() && *low >= 0.0 && *high > *low && *high <= 1.0e6)
+                    .then(|| format!("config_observer_transition {low} {high}\r\n")),
+            MotorConfigCommand::ConfigBackup(enabled) =>
+                Some(format!("config_backup {}\r\n", u8::from(*enabled))),
         }
     }
+}
+
+fn positive(value: f32) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+pub(crate) fn valid_filter(frequency: f32) -> bool {
+    positive(frequency) && (std::f32::consts::TAU * frequency).is_finite()
+}
+
+pub(crate) fn valid_pll(frequency: f32) -> bool {
+    let angular = std::f32::consts::TAU * frequency;
+    positive(frequency) && (angular * angular).is_finite()
 }
 
 pub enum MotorCalibrationCommand {

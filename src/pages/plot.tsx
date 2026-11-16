@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button.tsx";
 import { TelemetryChart } from "@/components/telemetry-chart.tsx";
 import { exportTelemetryCsv } from "@/lib/telemetry-export.ts";
 import type { TelemetryHistory } from "@/lib/telemetry-history.ts";
+import { STREAM_MODES, TELEMETRY_SOURCES as MODES } from "@/lib/telemetry-modes.ts";
 import { useDegAtom, useRpmAtom } from "@/stores/angle.ts";
 import { motorConnectedAtom } from "@/stores/motor.ts";
 import { pageAtom } from "@/stores/page.ts";
@@ -18,13 +19,6 @@ import {
 } from "@/stores/telemetry.ts";
 import type { StreamMode, TelemetryMode, TelemetrySample } from "@/stores/telemetry.ts";
 
-const MODES: Record<StreamMode, { name: string; labels: readonly string[] }> = {
-  iabc: { name: "三相电流", labels: ["Ia", "Ib", "Ic"] },
-  idq: { name: "DQ 轴电流", labels: ["Id", "Iq"] },
-  speed: { name: "机械速度", labels: ["速度给定", "速度反馈"] },
-  position: { name: "累计机械位置", labels: ["位置给定", "位置反馈"] },
-};
-const STREAM_MODES = Object.keys(MODES) as StreamMode[];
 const EMPTY: TelemetrySample[] = [];
 interface PausedView { mode: StreamMode; history: TelemetryHistory; end: number }
 type ExportScope = "current" | "window" | "all";
@@ -71,7 +65,7 @@ export default function Plot() {
   const anyHistory = STREAM_MODES.some((mode) => histories[mode].length > 0);
   const canExport = exportScope === "all" ? anyHistory : exportScope === "window" ? samples.length > 0 : history.length > 0;
   const unit = selectedMode === "speed" ? (useRpm ? "rpm" : "rad/s")
-    : selectedMode === "position" ? (useDeg ? "deg" : "rad") : "A";
+    : selectedMode === "position" ? (useDeg ? "deg" : "rad") : MODES[selectedMode].unit;
   const factor = selectedMode === "speed" && !useRpm ? 2 * Math.PI / 60
     : selectedMode === "position" && !useDeg ? Math.PI / 180 : 1;
 
@@ -119,7 +113,7 @@ export default function Plot() {
     <section className="w-full min-h-full min-w-0 flex flex-col border rounded-lg p-4 gap-4" data-testid="plot-page" data-mode={activeMode} data-selected-mode={selectedMode} data-sample-count={history.length} data-visible-count={samples.length} data-paused={Boolean(frozen)} data-session={session}>
       <header>
         <h1 className="text-lg font-semibold">波形图</h1>
-        <p className="text-sm text-muted-foreground">四种数据源互斥；点击直接切换，停止时只选择。停止采集仅发送 get_none，不会停止电机。</p>
+        <p className="text-sm text-muted-foreground">七种数据源互斥；点击直接切换，停止时只选择。停止采集仅发送 get_none，不会停止电机。</p>
       </header>
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1 text-sm">
@@ -158,7 +152,7 @@ export default function Plot() {
           </select>
         </label>
         <Button variant="outline" data-testid="plot-export" disabled={!canExport || exportBusy} onClick={() => void exportHistory()}>{exportBusy ? "正在导出…" : "导出 CSV…"}</Button>
-        <p className="text-xs text-muted-foreground">CSV 使用协议原始单位（A / rpm / deg）和主机接收秒，不随显示单位切换。所有源导出实时历史，不使用单源暂停快照。</p>
+        <p className="text-xs text-muted-foreground">CSV 使用协议原始单位（电流 A、机械速度 rpm、机械位置 deg、电角度 deg / 电气速度 rpm）和主机接收秒，不随显示单位切换。电气量不按极对数换算。所有源导出实时历史，不使用单源暂停快照。</p>
       </div>
       <p id="plot-status" role="status" className="text-sm text-muted-foreground">
         {!connected ? (anyHistory ? "设备已断开；保留上次连接历史，可回放和导出。" : "设备未连接。") : activeMode === "none" ? "未采集；保留本次连接历史。" : `已写出 ${activeMode} 模式命令（无固件确认）。`}

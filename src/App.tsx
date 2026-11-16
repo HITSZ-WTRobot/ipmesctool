@@ -14,6 +14,7 @@ import {
 } from "@/components/unit.tsx";
 import DebugRunConsole from "@/components/debug-run-console.tsx";
 import { ErrorBoundary } from "@/components/error-boundary.tsx";
+import { useMotorDiagnostics } from "@/hooks/use-motor-diagnostics";
 
 const SerialConsole = React.lazy(() => import("@/pages/serial-console.tsx"));
 const PidConfig = React.lazy(() => import("@/pages/pid-config.tsx"));
@@ -25,6 +26,7 @@ export const LazyPages = {
   "Motor.PID": PidConfig,
   "Motor.Encoder": React.lazy(() => import("@/pages/encoder-config.tsx")),
   "Motor.Calibration": React.lazy(() => import("@/pages/calibration.tsx")),
+  "Motor.Observer": React.lazy(() => import("@/pages/observer-config.tsx")),
   "Basic.DeviceInfo": DeviceInfo,
 } as const;
 
@@ -63,6 +65,7 @@ function App() {
   const locked = useAtomValue(windowLockedAtom);
   useSerialDebug();
   useTelemetry();
+  useMotorDiagnostics();
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       {locked && (

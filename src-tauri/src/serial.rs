@@ -1,7 +1,9 @@
+use crate::command::MotorState;
 use crate::exit_signal::ExitSignal;
 use crate::telemetry::{is_telemetry_line, parse_frame, TelemetrySample};
 use log::{debug, error};
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex as QueueMutex;
 use std::sync::Arc;
@@ -27,6 +29,8 @@ pub struct SerialDevice {
     recv_loop_handle: Mutex<Option<JoinHandle<()>>>,
     recv_loop_exit_signal: Arc<ExitSignal>,
     telemetry: QueueMutex<VecDeque<TelemetrySample>>,
+    diagnostics: QueueMutex<(Option<u8>, Option<u8>)>,
+    state_report: QueueMutex<Option<(u64, MotorState)>>,
 }
 
 impl SerialDevice {
@@ -43,6 +47,8 @@ impl SerialDevice {
             recv_loop_handle: Mutex::new(None),
             recv_loop_exit_signal: ExitSignal::new(),
             telemetry: QueueMutex::new(VecDeque::with_capacity(TELEMETRY_CAPACITY)),
+            diagnostics: QueueMutex::new((None, None)),
+            state_report: QueueMutex::new(None),
         })
     }
 
@@ -135,8 +141,35 @@ impl SerialDevice {
         }
         let line = raw.trim();
         if !line.is_empty() {
+            let mut fields = line.split_ascii_whitespace();
+            if let (Some(tag), Some(value), None) = (fields.next(), fields.next(), fields.next()) {
+                if tag == "state" {
+                    if let Ok(state) = MotorState::from_str(value) {
+                        let mut report = self.state_report.lock();
+                        let revision = report.map_or(1, |(revision, _)| revision + 1);
+                        *report = Some((revision, state));
+                    }
+                }
+                if let Ok(value) = value.parse::<u8>() {
+                    match tag {
+                        "fault" if value <= 3 => self.diagnostics.lock().0 = Some(value),
+                        "hfi_state" if value <= 4 => self.diagnostics.lock().1 = Some(value),
+                        _ => {}
+                    }
+                }
+            }
             let _ = self.recv_event_tx.send(line.to_owned());
         }
+    }
+
+    /// Latest valid reports for this connection, updated before response broadcast.
+    pub fn diagnostics(&self) -> (Option<u8>, Option<u8>) {
+        *self.diagnostics.lock()
+    }
+
+    /// Latest received state and its serial-order revision, independent of receiver lag.
+    pub fn state_report(&self) -> Option<(u64, MotorState)> {
+        *self.state_report.lock()
     }
 
     pub fn drain_telemetry(&self, batch: &mut Vec<TelemetrySample>) {
@@ -194,6 +227,9 @@ mod tests {
         for i in 0..10_000 {
             serial.receive_line("iabc:1.000,-2.000,3.000", i as f64 / 1000.0);
             serial.receive_line("speed:NaN,2", i as f64 / 1000.0);
+            serial.receive_line("angle:NaN,2", i as f64 / 1000.0);
+            serial.receive_line("observer_pos:1,2,3", i as f64 / 1000.0);
+            serial.receive_line("observer_speed:1,inf", i as f64 / 1000.0);
         }
         serial.receive_line("ok", 10.0);
         assert_eq!(replies.try_recv().unwrap(), "state Ready");
@@ -227,5 +263,43 @@ mod tests {
         assert_eq!(batch[0].mode, TelemetryMode::Speed);
         assert_eq!(batch[0].time, 0.75);
         assert_eq!(batch[0].raw, "speed:60.000,-59.000");
+    }
+
+    #[test]
+    fn diagnostics_preserve_valid_state_and_remain_console_visible() {
+        let serial = SerialDevice::new("unused".to_owned(), 115200);
+        let mut replies = serial.recv_event_tx.subscribe();
+        assert_eq!(serial.diagnostics(), (None, None));
+        for line in ["fault 3", "hfi_state 4"] {
+            serial.receive_line(line, 0.0);
+            assert_eq!(replies.try_recv().unwrap(), line);
+        }
+        assert_eq!(serial.diagnostics(), (Some(3), Some(4)));
+        for line in ["fault 4", "fault -1", "fault 0 extra", "hfi_state 5", "hfi_state NaN"] {
+            serial.receive_line(line, 0.0);
+            assert_eq!(replies.try_recv().unwrap(), line);
+            assert_eq!(serial.diagnostics(), (Some(3), Some(4)));
+        }
+        serial.receive_line("fault 0", 0.0);
+        serial.receive_line("hfi_state 0", 0.0);
+        assert_eq!(serial.diagnostics(), (Some(0), Some(0)));
+    }
+
+    #[test]
+    fn state_snapshot_advances_before_delayed_broadcast_consumers() {
+        let serial = SerialDevice::new("unused".to_owned(), 115200);
+        let mut replies = serial.recv_event_tx.subscribe();
+        assert_eq!(serial.state_report(), None);
+        serial.receive_line("state Ready", 0.0);
+        assert_eq!(serial.state_report(), Some((1, MotorState::Ready)));
+        serial.receive_line("state Fault", 0.1);
+        assert_eq!(replies.try_recv().unwrap(), "state Ready");
+        assert_eq!(serial.state_report(), Some((2, MotorState::Fault)));
+        for invalid in ["state Missing", "state Ready extra", "state ready"] {
+            serial.receive_line(invalid, 0.2);
+            assert_eq!(serial.state_report(), Some((2, MotorState::Fault)));
+        }
+        serial.receive_line("state Fault", 0.3);
+        assert_eq!(serial.state_report(), Some((3, MotorState::Fault)));
     }
 }

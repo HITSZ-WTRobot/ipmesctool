@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { motorConfigSchema } from "@/motor.ts";
 import type { MotorState } from "@/motor.ts";
+import { telemetryModeFromCommand } from "@/lib/telemetry-modes.ts";
 
 // Hidden persistent consoles keep the bounded store, but do not reconcile 5000 rows per batch.
 const visibleSerialDataAtom = atom((get) => get(pageAtom) === "Debug.Serial" ? get(serialDataAtom) : []);
@@ -55,7 +56,7 @@ export default function SerialConsole() {
       return;
     }
     if (command.length === 0) return;
-    const telemetryMode = command.match(/^get_(none|iabc|idq|speed|position)$/)?.[1];
+    const telemetryMode = telemetryModeFromCommand(command.trim());
     try {
       if (telemetryMode) {
         await invoke("set_telemetry_mode", { mode: telemetryMode });
@@ -67,8 +68,8 @@ export default function SerialConsole() {
       toast.error(`发送失败: ${e}`);
       return;
     }
-    // Stream controls only switch mode and never return ok or change motor configuration.
-    if (telemetryMode) return;
+    // Streams have no ACK; IAP releases the port immediately after its ACK.
+    if (telemetryMode || command.trim() === "iap") return;
     // raw 命令可能改变了设备状态/配置，刷新前端缓存以反映到其它页面；
     // 读取失败必须报出（命令本身已成功，但缓存可能已过期）
     try {

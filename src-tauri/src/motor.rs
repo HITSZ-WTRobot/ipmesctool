@@ -9,7 +9,8 @@ use crate::serial::{SerialDevice, TELEMETRY_CAPACITY};
 use crate::telemetry::{TelemetryMode, TelemetrySample};
 use log::warn;
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::str::FromStr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::select;
@@ -47,6 +48,15 @@ struct TelemetrySamplesEvent<'a> {
 #[serde(rename_all = "camelCase")]
 struct DisconnectedEvent<'a> {
     session_id: &'a str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotorDiagnostics {
+    pub session_id: String,
+    pub fault: u8,
+    /// 0=Bypass, 1=Starting, 2=Observing, 3=VoltageLimit, 4=Invalid.
+    pub hfi_state: Option<u8>,
 }
 
 /// 固件同步命令的结束标记：`ok` 或 `error <reason>`。
@@ -196,6 +206,20 @@ fn validate_config_command(cmd: &MotorConfigCommand) -> Result<(), MotorError> {
                 )));
             }
         }
+        _ => {
+            if cmd.to_string(&MotorState::Ready).is_none() {
+                let range = match cmd {
+                    MotorConfigCommand::ConfigFluxSpeed(_) => "flux speed must be in 100..=3000 mechanical rpm",
+                    MotorConfigCommand::ConfigSpeedFilter(_) | MotorConfigCommand::ConfigCurrentFilter(_) => "frequency must be positive and 2*pi*frequency must remain finite",
+                    MotorConfigCommand::ConfigSpeedPll(_) => "frequency must be positive and (2*pi*frequency)^2 must remain finite",
+                    MotorConfigCommand::ConfigHfi { .. } => "HFI requires voltage >= 0, positive kp/ki, and filter frequencies in (0, 2500) Hz",
+                    MotorConfigCommand::ConfigObserverFlux { .. } => "observer requires gamma in (0, 1e12], kp in (0, 1e6], ki in (0, 1e8]",
+                    MotorConfigCommand::ConfigObserverTransition { .. } => "transition requires 0 <= low < high <= 1000000 electrical rpm",
+                    _ => "configuration values outside firmware range",
+                };
+                return Err(MotorError::InvalidParameter(range.to_string()));
+            }
+        }
     }
     Ok(())
 }
@@ -257,6 +281,21 @@ fn prepare_run_command(
     Ok((command, Some(next_state)))
 }
 
+fn prepare_hfi_command(enabled: bool, state: &MotorState) -> Result<(String, Option<MotorState>), MotorError> {
+    if enabled && !matches!(state, MotorState::CurrentControl | MotorState::SpeedControl | MotorState::PositionControl) {
+        return Err(MotorError::InvalidState(format!("HFI enable requires CurrentControl, SpeedControl or PositionControl, current state {state}")));
+    }
+    // Backup/voltage effectiveness is firmware-owned; an ack is not an HFI state report.
+    Ok((if enabled { "hfi_enable\r\n" } else { "hfi_disable\r\n" }.to_string(), None))
+}
+
+fn prepare_iap_command(state: &MotorState) -> Result<(String, Option<MotorState>), MotorError> {
+    if *state != MotorState::Ready {
+        return Err(MotorError::InvalidState(format!("IAP requires Ready state, current state {state}")));
+    }
+    Ok(("iap\r\n".to_string(), None))
+}
+
 /// 解析 raw console 中 `set_* <value>` 的唯一数值参数。
 fn parse_raw_value(command: &str, name: &str) -> Result<f32, MotorError> {
     let mut tokens = command.split_whitespace();
@@ -276,33 +315,78 @@ fn parse_raw_value(command: &str, name: &str) -> Result<f32, MotorError> {
     Ok(value)
 }
 
-/// 已迁移的配置命令必须共用类型化命令的校验、状态与读回流程。
+fn raw_numbers<const N: usize>(command: &str) -> Result<[f32; N], MotorError> {
+    let mut tokens = command.split_whitespace();
+    let name = tokens.next().unwrap_or_default();
+    let error = || MotorError::InvalidParameter(format!("{name} expects exactly {N} finite numeric arguments"));
+    let mut values = [0.0; N];
+    for value in &mut values {
+        *value = tokens.next().and_then(|v| v.parse().ok()).ok_or_else(error)?;
+        require_finite(*value, name)?;
+    }
+    if tokens.next().is_some() { return Err(error()); }
+    Ok(values)
+}
+
+/// 已知配置命令共用类型化校验、Ready 状态约束、ack 与读回。
 fn parse_raw_config_command(command: &str) -> Result<Option<MotorConfigCommand>, MotorError> {
     let mut tokens = command.split_whitespace();
     let name = tokens.next().unwrap_or_default();
     let config = match name {
         "config_current_limit" => MotorConfigCommand::ConfigCurrentLimit(parse_raw_value(command, name)?),
         "config_speed_sweep_current" => MotorConfigCommand::ConfigSpeedSweepCurrent(parse_raw_value(command, name)?),
+        "config_flux_speed" => MotorConfigCommand::ConfigFluxSpeed(parse_raw_value(command, name)?),
+        "config_speed_filter" => MotorConfigCommand::ConfigSpeedFilter(parse_raw_value(command, name)?),
+        "config_current_filter" => MotorConfigCommand::ConfigCurrentFilter(parse_raw_value(command, name)?),
+        "config_speed_pll" => MotorConfigCommand::ConfigSpeedPll(parse_raw_value(command, name)?),
         "config_current_pi" => {
-            let mut next_gain = || {
-                tokens.next().and_then(|value| value.parse::<f32>().ok()).ok_or_else(|| {
-                    MotorError::InvalidParameter(
-                        "config_current_pi expects exactly four numeric arguments".to_string(),
-                    )
-                })
+            let [d_kp, d_ki, q_kp, q_ki] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigCurrentPi { d_kp, d_ki, q_kp, q_ki }
+        }
+        "config_speed_pi" => {
+            let [kp, ki, output_max] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigSpeedPi { kp, ki, output_max }
+        }
+        "config_position_pid" => {
+            let [kp, ki, kd, output_max] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigPositionPid { kp, ki, kd, output_max }
+        }
+        "config_hfi" => {
+            let [voltage, current_filter, kp, ki, speed_filter] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigHfi { voltage, current_filter, kp, ki, speed_filter }
+        }
+        "config_observer_flux" => {
+            let [gamma, kp, ki] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigObserverFlux { gamma, kp, ki }
+        }
+        "config_observer_transition" => {
+            let [low, high] = raw_numbers(command)?;
+            MotorConfigCommand::ConfigObserverTransition { low, high }
+        }
+        "config_backup" => {
+            let enabled = match (tokens.next(), tokens.next()) {
+                (Some("0"), None) => false,
+                (Some("1"), None) => true,
+                _ => return Err(MotorError::InvalidParameter("config_backup expects exactly 0 or 1".to_string())),
             };
-            let config = MotorConfigCommand::ConfigCurrentPi {
-                d_kp: next_gain()?,
-                d_ki: next_gain()?,
-                q_kp: next_gain()?,
-                q_ki: next_gain()?,
-            };
+            MotorConfigCommand::ConfigBackup(enabled)
+        }
+        "config_id" => {
+            let id = tokens.next().and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| MotorError::InvalidParameter("config_id expects an unsigned integer".to_string()))?;
             if tokens.next().is_some() {
-                return Err(MotorError::InvalidParameter(
-                    "config_current_pi expects exactly four numeric arguments".to_string(),
-                ));
+                return Err(MotorError::InvalidParameter("config_id expects exactly one argument".to_string()));
             }
-            config
+            MotorConfigCommand::ConfigId(id)
+        }
+        "config_encoder" => {
+            let error = || MotorError::InvalidParameter("config_encoder expects pole_pairs CW|CCW offset encoder_type".to_string());
+            let pole_pairs = tokens.next().and_then(|v| v.parse::<u32>().ok()).ok_or_else(error)?;
+            let encoder_direction = tokens.next().and_then(|v| crate::config_parser::EncoderDirection::from_str(v).ok()).ok_or_else(error)?;
+            let encoder_offset = tokens.next().and_then(|v| v.parse::<f32>().ok()).ok_or_else(error)?;
+            let encoder_type = tokens.next().and_then(|v| crate::config_parser::EncoderType::from_str(v).ok()).ok_or_else(error)?;
+            if tokens.next().is_some() { return Err(error()); }
+            MotorConfigCommand::ConfigEncoder { pole_pairs, encoder_direction, encoder_offset, encoder_type }
         }
         _ => return Ok(None),
     };
@@ -321,6 +405,9 @@ pub struct Motor {
     /// 所有请求（含 raw console）共用一把锁：写与回包必须一一配对。
     request_lock: Mutex<()>,
     telemetry_mode: Mutex<TelemetryMode>,
+    diagnostics: Mutex<(u8, Option<u8>)>,
+    state_report_revision: Mutex<u64>,
+    disconnected_emitted: AtomicBool,
     console_handle: Mutex<Option<JoinHandle<()>>>,
     console_exit_signal: Arc<ExitSignal>,
 }
@@ -335,6 +422,9 @@ impl Motor {
             app,
             request_lock: Mutex::new(()),
             telemetry_mode: Mutex::new(TelemetryMode::None),
+            diagnostics: Mutex::new((0, None)),
+            state_report_revision: Mutex::new(0),
+            disconnected_emitted: AtomicBool::new(false),
             console_handle: Mutex::new(None),
             console_exit_signal: ExitSignal::new(),
         })
@@ -419,24 +509,73 @@ impl Motor {
         result.and(close_result)
     }
 
+    fn emit_disconnected(&self) {
+        if !self.disconnected_emitted.swap(true, Ordering::Relaxed) {
+            if let Err(e) = self.app.emit("motor-disconnected", DisconnectedEvent { session_id: &self.session_id }) {
+                warn!("failed to emit motor-disconnected: {e}");
+            }
+        }
+    }
+
+    /// Read serial's latest ordered report, rather than replaying a delayed broadcast value.
+    pub async fn get_diagnostics(&self) -> MotorDiagnostics {
+        let mut config = self.motor_config.lock().await;
+        let mut previous = self.diagnostics.lock().await;
+        let (reported_fault, hfi_state) = self.serial.diagnostics();
+        let fault = reported_fault.or_else(|| config.as_ref().map(|c| c.fault)).unwrap_or(previous.0);
+        if let Some(config) = config.as_mut() { config.fault = fault; }
+        let diagnostics = MotorDiagnostics { session_id: self.session_id.clone(), fault, hfi_state };
+        if *previous != (fault, hfi_state) {
+            *previous = (fault, hfi_state);
+            if let Err(e) = self.app.emit("motor-diagnostics", &diagnostics) {
+                warn!("failed to emit motor-diagnostics: {e}");
+            }
+        }
+        diagnostics
+    }
+
     fn emit_calibration_state(&self, state: &CalibrationState) {
         if let Err(e) = self.app.emit("calibration-state", state) {
             warn!("failed to emit calibration-state: {e}");
         }
     }
 
-    /// 与固件状态同步，仅在变化时通知前端，并让配置缓存中的 state 保持一致。
+    /// Firmware reports win over snapshots; consumed revisions prevent delayed console replay.
     pub async fn set_state(&self, next: MotorState) {
+        self.commit_state(next, 0).await;
+    }
+
+    async fn apply_state(&self, next: MotorState) {
         let mut current = self.state.lock().await;
-        if *current == next {
-            return;
-        }
+        let changed = *current != next;
         *current = next;
         drop(current);
         if let Some(config) = self.motor_config.lock().await.as_mut() {
             config.state = next;
         }
-        self.emit_state(next);
+        if changed { self.emit_state(next); }
+    }
+
+    async fn commit_state(&self, fallback: MotorState, since_revision: u64) {
+        let mut consumed = self.state_report_revision.lock().await;
+        let next = match self.serial.state_report() {
+            Some((revision, state)) => {
+                *consumed = revision;
+                if revision > since_revision { state } else { fallback }
+            }
+            None => fallback,
+        };
+        self.apply_state(next).await;
+    }
+
+    async fn sync_reported_state(&self) {
+        let mut consumed = self.state_report_revision.lock().await;
+        if let Some((revision, state)) = self.serial.state_report() {
+            if revision > *consumed {
+                *consumed = revision;
+                self.apply_state(state).await;
+            }
+        }
     }
 
     /// 超时/丢行后回包边界无法确定：关闭串口，由用户重新连接。
@@ -463,12 +602,16 @@ impl Motor {
                     line = rx.recv() => match line {
                         Ok(line) if line == DISCONNECTED_SENTINEL => {
                             this.clear_telemetry().await;
-                            if let Err(e) = app.emit("motor-disconnected", DisconnectedEvent { session_id: &this.session_id }) {
-                                warn!("failed to emit motor-disconnected: {e}");
-                            }
+                            this.emit_disconnected();
                             break;
                         }
                         Ok(line) => {
+                            if matches!(line.split_whitespace().next(), Some("fault" | "hfi_state")) {
+                                this.get_diagnostics().await;
+                            }
+                            if line.starts_with("state ") {
+                                this.sync_reported_state().await;
+                            }
                             if let Err(e) = app.emit("serial-received", &line) {
                                 warn!("failed to emit serial-received: {e}");
                             }
@@ -535,8 +678,10 @@ impl Motor {
         P: FnOnce(&MotorState) -> Result<(String, Option<MotorState>), MotorError>,
         H: FnMut(&str) -> Result<(), MotorError>,
     {
+        self.sync_reported_state().await;
         let state = *self.state.lock().await;
         let (command, next_state) = prepare(&state)?;
+        let state_revision = self.serial.state_report().map_or(0, |(revision, _)| revision);
 
         // 订阅必须早于写入：固件回包可能紧随写入之后到达。
         let mut rx = self.serial.recv_event_tx.subscribe();
@@ -591,12 +736,12 @@ impl Motor {
 
         // 只有 ack 之后才同步新状态（set_state 同时刷新配置缓存里的 state）。
         if let Some(next) = next_state {
-            self.set_state(next).await;
+            self.commit_state(next, state_revision).await;
         }
         Ok(())
     }
 
-    /// 读取 `get_config`（9 行数据 + ok），成功时更新配置缓存并同步状态。
+    /// 读取 `get_config`（14 个必需数据 tag + ok），成功时同步配置、状态与诊断。
     ///
     /// 「读快照 + 提交缓存/状态」必须在同一个请求锁周期内完成，否则提交前可能被
     /// 并发的运行命令写入更新的状态，再被这份旧快照覆盖。
@@ -624,12 +769,21 @@ impl Motor {
         if let Some(e) = parse_error {
             return Err(MotorError::ParseError(e));
         }
-        let config = parser
+        let mut config = parser
             .try_into_motor_config()
             .map_err(MotorError::ParseError)?;
-        *self.motor_config.lock().await = Some(config.clone());
+        {
+            let mut cached = self.motor_config.lock().await;
+            // Reports can arrive after the snapshot row but before its ack. Never overwrite
+            // a newer fault report with the earlier get_config value.
+            if let (Some(fault), _) = self.serial.diagnostics() { config.fault = fault; }
+            *cached = Some(config.clone());
+        }
+        self.get_diagnostics().await;
         // 固件上报的状态是权威值：任何成功的 get_config（含 raw / 校准后刷新）都同步状态。
         self.set_state(config.state).await;
+        config.state = *self.state.lock().await;
+        config.fault = self.serial.diagnostics().0.unwrap_or(config.fault);
         Ok(config)
     }
 
@@ -669,6 +823,22 @@ impl Motor {
         Ok(())
     }
 
+    pub async fn set_hfi_enabled(self: &Arc<Self>, enabled: bool) -> Result<(), MotorError> {
+        self.transact(COMMAND_TIMEOUT, |state| prepare_hfi_command(enabled, state), |_| Ok(())).await
+    }
+
+    /// Firmware acknowledges and resets immediately. Do not send get_config or get_none.
+    pub async fn iap(self: &Arc<Self>) -> Result<(), MotorError> {
+        let _guard = self.request_lock.lock().await;
+        self.transact_locked(COMMAND_TIMEOUT, prepare_iap_command, |_| Ok(())).await?;
+        // Called by an invoke/raw request, never by the console task itself.
+        self.stop_console_loop().await;
+        let result = self.serial.disconnect().await.map_err(MotorError::SerialError);
+        self.clear_telemetry().await;
+        self.emit_disconnected();
+        result
+    }
+
     /// 运行/停机/清故障命令：仅收到 ok 后才更新电机状态。
     pub async fn send_running_command(
         self: &Arc<Self>,
@@ -689,7 +859,9 @@ impl Motor {
     pub async fn calibration(self: &Arc<Self>) -> Result<CalibrationState, MotorError> {
         let guard = self.request_lock.lock().await;
 
+        self.sync_reported_state().await;
         let state = *self.state.lock().await;
+        let state_revision = self.serial.state_report().map_or(0, |(revision, _)| revision);
         if !state.allows_calibration() {
             return Err(MotorError::InvalidState(format!(
                 "calibration is only allowed in Ready state, current state {state}"
@@ -735,7 +907,7 @@ impl Motor {
                     match classify_ack(&line) {
                         Some(Ack::Ok) => {
                             started = true;
-                            self.set_state(MotorState::Calibration).await;
+                            self.commit_state(MotorState::Calibration, state_revision).await;
                         }
                         Some(Ack::Error(reason)) => {
                             return WaitOutcome::Failed(MotorError::FirmwareError(reason));
@@ -843,6 +1015,9 @@ impl Motor {
         }
 
         match command {
+            "hfi_enable" => return self.set_hfi_enabled(true).await,
+            "hfi_disable" => return self.set_hfi_enabled(false).await,
+            "iap" => return self.iap().await,
             "calibration" => return self.calibration().await.map(|_| ()),
             "stop" => return self.send_running_command(&MotorRunCommand::Stop).await,
             "clear_fault" => {
@@ -863,6 +1038,9 @@ impl Motor {
 
         let name = command.split_whitespace().next().unwrap_or_default();
         match name {
+            "hfi_enable" | "hfi_disable" | "iap" => {
+                return Err(MotorError::InvalidParameter(format!("{name} expects no arguments")));
+            }
             "set_speed" => {
                 let speed = parse_raw_value(command, "set_speed")?;
                 return self
@@ -920,6 +1098,8 @@ mod tests {
         // 数据行与无关行不得被当作结束标记。
         assert!(classify_ack("state Ready").is_none());
         assert!(classify_ack("calibration_status running").is_none());
+        assert!(classify_ack("fault 3").is_none());
+        assert!(classify_ack("hfi_state 4").is_none());
         assert!(classify_ack("errors noted").is_none());
     }
 
@@ -1137,5 +1317,40 @@ mod tests {
         assert!(parse_raw_value("set_speed 1 2", "set_speed").is_err());
         assert!(parse_raw_value("set_speed NaN", "set_speed").is_err());
         assert!(parse_raw_value("set_speed abc", "set_speed").is_err());
+    }
+
+    #[test]
+    fn sensorless_controls_obey_distinct_state_gates() {
+        for state in [MotorState::Initialization, MotorState::Calibration, MotorState::CurrentControl,
+            MotorState::SpeedControl, MotorState::PositionControl, MotorState::Ready, MotorState::Fault, MotorState::Unknown] {
+            let control = matches!(state, MotorState::CurrentControl | MotorState::SpeedControl | MotorState::PositionControl);
+            assert_eq!(prepare_hfi_command(true, &state).is_ok(), control);
+            assert!(prepare_hfi_command(false, &state).is_ok());
+            assert_eq!(prepare_iap_command(&state).is_ok(), state == MotorState::Ready);
+        }
+    }
+
+    #[test]
+    fn raw_sensorless_configuration_validates_boundaries_and_ready() {
+        for input in ["config_flux_speed 100", "config_flux_speed 3000", "config_speed_filter 100",
+            "config_current_filter 200", "config_speed_pll 50", "config_hfi 0 100 1 2 50",
+            "config_observer_flux 1e12 1e6 1e8", "config_observer_transition 0 1000000", "config_backup 0", "config_backup 1"] {
+            let config = parse_raw_config_command(input).unwrap().unwrap();
+            assert!(prepare_config_command(&config, &MotorState::Ready).is_ok(), "{input}");
+            for state in [MotorState::Initialization, MotorState::Calibration, MotorState::CurrentControl,
+                MotorState::SpeedControl, MotorState::PositionControl, MotorState::Fault, MotorState::Unknown] {
+                assert!(matches!(prepare_config_command(&config, &state), Err(MotorError::InvalidState(_))), "{input} in {state}");
+            }
+        }
+        for input in ["config_flux_speed 99", "config_flux_speed 3001", "config_speed_filter 0",
+            "config_current_filter 3.4028235e38", "config_speed_pll 1e20", "config_hfi -1 100 1 2 50",
+            "config_hfi 1 2500 1 2 50", "config_hfi 1 100 0 2 50", "config_hfi 1 100 1 2 2500",
+            "config_observer_flux 1.1e12 1 1", "config_observer_flux 1 1.1e6 1", "config_observer_flux 1 1 1.1e8",
+            "config_observer_transition -1 10", "config_observer_transition 10 10", "config_observer_transition 0 1000001",
+            "config_backup true", "config_backup 2", "config_backup 1 0", "config_hfi 1 100 1 2",
+            "config_observer_flux 1 2 3 4", "config_speed_pll NaN", "config_flux_speed inf"] {
+            let result = parse_raw_config_command(input).and_then(|config| prepare_config_command(&config.unwrap(), &MotorState::Ready));
+            assert!(matches!(result, Err(MotorError::InvalidParameter(_))), "{input}");
+        }
     }
 }

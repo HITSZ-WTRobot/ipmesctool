@@ -44,6 +44,9 @@ export type SpeedPI = z.infer<typeof speedPI>;
 /** 速度环参数辨识正弦 q 轴电流幅值（A） */
 export const speedSweep = z.object({
   iq_amplitude: z.number(),
+  speed_filter: z.number().finite().positive(),
+  current_filter: z.number().finite().positive(),
+  pll_frequency: z.number().finite().positive(),
 });
 
 export type SpeedSweep = z.infer<typeof speedSweep>;
@@ -62,11 +65,13 @@ export const currentProtection = z.object({
 
 export type CurrentProtection = z.infer<typeof currentProtection>;
 
-/** 电机电气参数，由校准识别，无运行时写入命令（只读展示） */
+/** 电气参数由校准识别；flux_speed 为可配置的辨识机械速度幅值。 */
 export const motorElectricalConfig = z.object({
   rs: z.number(),
   ld: z.number(),
   lq: z.number(),
+  flux: z.number().finite().nonnegative(),
+  flux_speed: z.number().finite().min(100).max(3000),
 });
 
 export type MotorElectricalConfig = z.infer<typeof motorElectricalConfig>;
@@ -107,8 +112,45 @@ export const encoderConfig = z.object({
 
 export type EncoderConfig = z.infer<typeof encoderConfig>;
 
+export const hfiConfigSchema = z.object({
+  voltage: z.number().finite().nonnegative(),
+  current_filter: z.number().finite().positive().lt(2500),
+  kp: z.number().finite().positive(),
+  ki: z.number().finite().positive(),
+  speed_filter: z.number().finite().positive().lt(2500),
+});
+
+export const observerFluxSchema = z.object({
+  gamma: z.number().finite().positive().max(1e12),
+  kp: z.number().finite().positive().max(1e6),
+  ki: z.number().finite().positive().max(1e8),
+});
+
+export const transitionSchema = z.object({
+  low: z.number().finite().nonnegative(),
+  high: z.number().finite().positive().max(1e6),
+}).refine(({ low, high }) => low < high, "过渡区必须满足 0 ≤ low < high ≤ 1000000");
+
+export const motorDiagnosticsSchema = z.object({
+  sessionId: z.string(),
+  fault: z.number().int().min(0).max(255),
+  hfiState: z.number().int().min(0).max(4).nullable(),
+});
+export type MotorDiagnostics = z.infer<typeof motorDiagnosticsSchema>;
+
+export const HFI_STATE_LABELS = ["Bypass（旁路）", "Starting（启动中）", "Observing（观测中）", "VoltageLimit（电压受限）", "Invalid（无效）"] as const;
+
+export function describeFault(fault: number): string {
+  const flags = [];
+  if (fault & 1) flags.push("过流");
+  if (fault & 2) flags.push("编码器");
+  if (fault & ~3) flags.push(`未知位 0x${(fault & ~3).toString(16)}`);
+  return `${fault} (${flags.join("、") || "无故障"})`;
+}
+
 export const motorConfigSchema = z.object({
   state: motorState,
+  fault: z.number().int().min(0).max(255),
   id: z.number().int().min(0).max(4294967295),
   protection: currentProtection,
   motor: motorElectricalConfig,
@@ -118,6 +160,10 @@ export const motorConfigSchema = z.object({
   current_id_pi: currentPI,
   current_iq_pi: currentPI,
   encoder_config: encoderConfig,
+  hfi: hfiConfigSchema,
+  observer_flux: observerFluxSchema,
+  transition: transitionSchema,
+  backup: z.object({ enabled: z.boolean() }),
 });
 
 export type MotorConfig = z.infer<typeof motorConfigSchema>;

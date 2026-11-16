@@ -1,36 +1,25 @@
-use crate::command::MotorState;
+use crate::command::{MotorConfigCommand, MotorState};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use strum_macros::{Display, EnumString};
 
-/// 固件 `get_config` 输出的三行电机电气参数（单位：Ohm / H）。
+/// 固件电机电气参数（Ohm / H / Wb）及磁链辨识机械速度（rpm）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MotorElectricalConfig {
     pub rs: f32,
     pub ld: f32,
     pub lq: f32,
+    pub flux: f32,
+    pub flux_speed: f32,
 }
 
-/// 解析固件 `get_config` 的 9 行数据输出。
-///
-/// 固件格式（每行 CRLF，浮点为 `%.7g` 可变位数）：
-/// ```text
-/// state Ready
-/// id 1
-/// protection current_limit=10
-/// motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778
-/// current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275
-/// speed_pi kp=0.03703183 ki=0.8226405 outputmax=2
-/// speed_sweep iq_amplitude=0.5
-/// position_pid kp=3 ki=3 kd=0 outputmax=2000
-/// encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI
-/// ok
-/// ```
+/// 解析固件 `get_config` 的 14 个必需数据 tag；最后的 `ok` 由事务层处理。
 /// `ok` / `error ...` 等应答由后端处理；本解析器忽略无关行，
 /// 但对可识别的配置行若字段缺失或无法解析会返回错误。
 #[derive(Debug, Default)]
 pub struct ConfigParser {
     state: Option<MotorState>,
+    fault: Option<u8>,
     id: Option<u32>,
     protection: Option<ProtectionConfig>,
     motor: Option<MotorElectricalConfig>,
@@ -40,6 +29,10 @@ pub struct ConfigParser {
     speed_sweep: Option<SpeedSweepConfig>,
     position_pid: Option<PositionPIDConfig>,
     encoder: Option<EncoderConfig>,
+    hfi: Option<HfiConfig>,
+    observer_flux: Option<ObserverFluxConfig>,
+    transition: Option<TransitionConfig>,
+    backup: Option<BackupConfig>,
 }
 
 impl ConfigParser {
@@ -59,6 +52,9 @@ impl ConfigParser {
                 let state = MotorState::from_str(name)
                     .map_err(|_| format!("state: unknown motor state `{name}`"))?;
                 self.state = Some(state);
+            }
+            "fault" => {
+                self.fault = Some(parse_fault(single_token(rest, "fault")?)?);
             }
             "id" => {
                 let value = single_token(rest, "id")?;
@@ -81,7 +77,14 @@ impl ConfigParser {
                     rs: parse_float(kv(&pairs, "rs", "motor")?, "motor.rs")?,
                     ld: parse_float(kv(&pairs, "ld", "motor")?, "motor.ld")?,
                     lq: parse_float(kv(&pairs, "lq", "motor")?, "motor.lq")?,
+                    flux: parse_float(kv(&pairs, "flux", "motor")?, "motor.flux")?,
+                    flux_speed: parse_float(kv(&pairs, "flux_speed", "motor")?, "motor.flux_speed")?,
                 });
+                let motor = self.motor.as_ref().expect("just parsed");
+                if motor.flux < 0.0 {
+                    return Err("motor.flux: value must not be negative".to_string());
+                }
+                validate_readback(&MotorConfigCommand::ConfigFluxSpeed(motor.flux_speed), "motor.flux_speed")?;
             }
             "current_pi" => {
                 let pairs = kv_pairs(rest)?;
@@ -110,7 +113,14 @@ impl ConfigParser {
                         kv(&pairs, "iq_amplitude", "speed_sweep")?,
                         "speed_sweep.iq_amplitude",
                     )?,
+                    speed_filter: parse_float(kv(&pairs, "speed_filter", "speed_sweep")?, "speed_sweep.speed_filter")?,
+                    current_filter: parse_float(kv(&pairs, "current_filter", "speed_sweep")?, "speed_sweep.current_filter")?,
+                    pll_frequency: parse_float(kv(&pairs, "pll_frequency", "speed_sweep")?, "speed_sweep.pll_frequency")?,
                 });
+                let sweep = self.speed_sweep.as_ref().expect("just parsed");
+                validate_readback(&MotorConfigCommand::ConfigSpeedFilter(sweep.speed_filter), "speed_sweep.speed_filter")?;
+                validate_readback(&MotorConfigCommand::ConfigCurrentFilter(sweep.current_filter), "speed_sweep.current_filter")?;
+                validate_readback(&MotorConfigCommand::ConfigSpeedPll(sweep.pll_frequency), "speed_sweep.pll_frequency")?;
             }
             "position_pid" => {
                 let pairs = kv_pairs(rest)?;
@@ -145,18 +155,70 @@ impl ConfigParser {
                     encoder_type,
                 });
             }
+            "hfi" => {
+                let pairs = kv_pairs(rest)?;
+                self.hfi = Some(HfiConfig {
+                    voltage: parse_float(kv(&pairs, "voltage", "hfi")?, "hfi.voltage")?,
+                    current_filter: parse_float(kv(&pairs, "current_filter", "hfi")?, "hfi.current_filter")?,
+                    kp: parse_float(kv(&pairs, "kp", "hfi")?, "hfi.kp")?,
+                    ki: parse_float(kv(&pairs, "ki", "hfi")?, "hfi.ki")?,
+                    speed_filter: parse_float(kv(&pairs, "speed_filter", "hfi")?, "hfi.speed_filter")?,
+                });
+                let hfi = self.hfi.as_ref().expect("just parsed");
+                validate_readback(&MotorConfigCommand::ConfigHfi {
+                    voltage: hfi.voltage, current_filter: hfi.current_filter,
+                    kp: hfi.kp, ki: hfi.ki, speed_filter: hfi.speed_filter,
+                }, "hfi")?;
+            }
+            "observer_flux" => {
+                let pairs = kv_pairs(rest)?;
+                self.observer_flux = Some(ObserverFluxConfig {
+                    gamma: parse_float(kv(&pairs, "gamma", "observer_flux")?, "observer_flux.gamma")?,
+                    kp: parse_float(kv(&pairs, "kp", "observer_flux")?, "observer_flux.kp")?,
+                    ki: parse_float(kv(&pairs, "ki", "observer_flux")?, "observer_flux.ki")?,
+                });
+                let flux = self.observer_flux.as_ref().expect("just parsed");
+                validate_readback(&MotorConfigCommand::ConfigObserverFlux {
+                    gamma: flux.gamma, kp: flux.kp, ki: flux.ki,
+                }, "observer_flux")?;
+            }
+            "transition" => {
+                let pairs = kv_pairs(rest)?;
+                self.transition = Some(TransitionConfig {
+                    low: parse_float(kv(&pairs, "low", "transition")?, "transition.low")?,
+                    high: parse_float(kv(&pairs, "high", "transition")?, "transition.high")?,
+                });
+                let transition = self.transition.as_ref().expect("just parsed");
+                validate_readback(&MotorConfigCommand::ConfigObserverTransition {
+                    low: transition.low, high: transition.high,
+                }, "transition")?;
+            }
+            "backup" => {
+                let pairs = kv_pairs(rest)?;
+                let enabled = match kv(&pairs, "enabled", "backup")? {
+                    "0" => false,
+                    "1" => true,
+                    value => return Err(format!("backup.enabled: expected 0 or 1, got `{value}`")),
+                };
+                self.backup = Some(BackupConfig { enabled });
+            }
             // `ok`、`error ...`、校准行等与配置读取无关的行一律忽略。
             _ => {}
         }
         Ok(())
     }
 
-    /// 将已解析的全部 9 行转换为 `MotorConfig`；缺少字段时返回列出所有缺失字段的错误。
+    /// 将全部 14 个必需 tag 转换为 `MotorConfig`；不接受旧版缺字段快照。
     pub fn try_into_motor_config(&self) -> Result<MotorConfig, String> {
         let mut missing: Vec<&str> = Vec::new();
         if self.state.is_none() {
             missing.push("state");
         }
+        if self.fault.is_none() { missing.push("fault"); }
+        if self.hfi.is_none() { missing.push("hfi"); }
+        if self.observer_flux.is_none() { missing.push("observer_flux"); }
+        if self.transition.is_none() { missing.push("transition"); }
+        if self.backup.is_none() { missing.push("backup"); }
         if self.id.is_none() {
             missing.push("id");
         }
@@ -191,6 +253,11 @@ impl ConfigParser {
         let current_pi = self.current_pi.expect("checked above");
         Ok(MotorConfig {
             state: self.state.expect("checked above"),
+            fault: self.fault.expect("checked above"),
+            hfi: self.hfi.clone().expect("checked above"),
+            observer_flux: self.observer_flux.clone().expect("checked above"),
+            transition: self.transition.clone().expect("checked above"),
+            backup: self.backup.clone().expect("checked above"),
             id: self.id.expect("checked above"),
             protection: self.protection.clone().expect("checked above"),
             motor: self.motor.clone().expect("checked above"),
@@ -233,6 +300,22 @@ fn parse_u32(value: &str, field: &str) -> Result<u32, String> {
     value
         .parse::<u32>()
         .map_err(|_| format!("{field}: invalid unsigned integer `{value}`"))
+}
+
+pub(crate) fn parse_fault(value: &str) -> Result<u8, String> {
+    let fault = parse_u32(value, "fault")?;
+    if fault & !3 != 0 {
+        return Err(format!("fault: unknown fault bits `{value}`"));
+    }
+    Ok(fault as u8)
+}
+
+fn validate_readback(command: &MotorConfigCommand, field: &str) -> Result<(), String> {
+    if command.to_string(&MotorState::Ready).is_some() {
+        Ok(())
+    } else {
+        Err(format!("{field}: values outside firmware range"))
+    }
 }
 
 fn kv_pairs(rest: &str) -> Result<Vec<(&str, &str)>, String> {
@@ -287,6 +370,37 @@ pub struct SpeedPIConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeedSweepConfig {
     pub iq_amplitude: f32,
+    pub speed_filter: f32,
+    pub current_filter: f32,
+    pub pll_frequency: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HfiConfig {
+    pub voltage: f32,
+    pub current_filter: f32,
+    pub kp: f32,
+    pub ki: f32,
+    pub speed_filter: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObserverFluxConfig {
+    pub gamma: f32,
+    pub kp: f32,
+    pub ki: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionConfig {
+    pub low: f32,
+    pub high: f32,
+}
+
+/// 运行时备份开关；此命令不写 Flash。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -348,6 +462,11 @@ pub struct EncoderConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MotorConfig {
     pub state: MotorState,
+    pub fault: u8,
+    pub hfi: HfiConfig,
+    pub observer_flux: ObserverFluxConfig,
+    pub transition: TransitionConfig,
+    pub backup: BackupConfig,
     pub id: u32,
     pub protection: ProtectionConfig,
     pub motor: MotorElectricalConfig,
@@ -366,14 +485,19 @@ mod tests {
     /// 用户提供的固件 `get_config` 完整样本。
     const SAMPLE: &[&str] = &[
         "state Ready",
+        "fault 0",
         "id 1",
         "protection current_limit=10",
-        "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778",
+        "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778 flux=0.003 flux_speed=1000",
         "current_pi d_kp=0.4650604 d_ki=186.7275 q_kp=0.2910778 q_ki=186.7275",
         "speed_pi kp=0.03703183 ki=0.8226405 outputmax=2",
-        "speed_sweep iq_amplitude=0.5",
+        "speed_sweep iq_amplitude=0.5 speed_filter=100 current_filter=200 pll_frequency=50",
         "position_pid kp=3 ki=3 kd=0 outputmax=2000",
         "encoder pole_pairs=7 direction=CCW offset=1.6083 type=MT6701_SPI",
+        "hfi voltage=0 current_filter=100 kp=1 ki=2 speed_filter=50",
+        "observer_flux gamma=1000 kp=20 ki=30",
+        "transition low=100 high=200",
+        "backup enabled=0",
         "ok",
     ];
 
@@ -392,6 +516,16 @@ mod tests {
             .expect("complete sample");
 
         assert_eq!(config.state, MotorState::Ready);
+        assert_eq!(config.fault, 0);
+        assert_eq!(config.motor.flux, 0.003);
+        assert_eq!(config.motor.flux_speed, 1000.0);
+        assert_eq!(config.speed_sweep.speed_filter, 100.0);
+        assert_eq!(config.speed_sweep.current_filter, 200.0);
+        assert_eq!(config.speed_sweep.pll_frequency, 50.0);
+        assert_eq!(config.hfi, HfiConfig { voltage: 0.0, current_filter: 100.0, kp: 1.0, ki: 2.0, speed_filter: 50.0 });
+        assert_eq!(config.observer_flux, ObserverFluxConfig { gamma: 1000.0, kp: 20.0, ki: 30.0 });
+        assert_eq!(config.transition, TransitionConfig { low: 100.0, high: 200.0 });
+        assert!(!config.backup.enabled);
         assert_eq!(config.id, 1);
         assert_eq!(config.protection.current_limit, 10.0);
         assert!((config.motor.rs - 0.1867275).abs() < 1e-9);
@@ -424,8 +558,8 @@ mod tests {
         for line in SAMPLE {
             let substituted = match *line {
                 "id 1" => "id 4294967295",
-                "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778" => {
-                    "motor rs=1.867275e-1 ld=4.650604e-4 lq=2.910778e-4"
+                "motor rs=0.1867275 ld=0.0004650604 lq=0.0002910778 flux=0.003 flux_speed=1000" => {
+                    "motor rs=1.867275e-1 ld=4.650604e-4 lq=2.910778e-4 flux=3e-3 flux_speed=1e3"
                 }
                 other => other,
             };
@@ -527,5 +661,39 @@ mod tests {
             }
             assert!(parser.try_into_motor_config().is_err());
         }
+    }
+
+    #[test]
+    fn expanded_fields_are_required_and_reject_nonfinite_values() {
+        for row in SAMPLE.iter().filter(|line| matches!(line.split_whitespace().next(),
+            Some("motor" | "speed_sweep" | "hfi" | "observer_flux" | "transition"))) {
+            let tokens: Vec<_> = row.split_whitespace().collect();
+            for index in 1..tokens.len() {
+                let omitted = tokens.iter().enumerate().filter_map(|(i, token)| (i != index).then_some(*token)).collect::<Vec<_>>().join(" ");
+                assert!(ConfigParser::default().parse_line(&omitted).is_err(), "{omitted}");
+                let key = tokens[index].split_once('=').unwrap().0;
+                for invalid in ["NaN", "inf", "-inf"] {
+                    let mut malformed = tokens.iter().map(|token| token.to_string()).collect::<Vec<_>>();
+                    malformed[index] = format!("{key}={invalid}");
+                    let malformed = malformed.join(" ");
+                    assert!(ConfigParser::default().parse_line(&malformed).is_err(), "{malformed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fault_masks_and_backup_boolean_are_strict() {
+        for value in ["0", "1", "2", "3"] {
+            let mut parser = parse_sample();
+            parser.parse_line(&format!("fault {value}")).unwrap();
+            assert_eq!(parser.try_into_motor_config().unwrap().fault, value.parse::<u8>().unwrap());
+        }
+        for row in ["fault 4", "fault 255", "fault -1", "fault 1 2", "backup enabled=true", "backup enabled=2", "backup enabled=1 enabled=0"] {
+            assert!(ConfigParser::default().parse_line(row).is_err(), "{row}");
+        }
+        let mut parser = parse_sample();
+        parser.parse_line("backup enabled=1").unwrap();
+        assert!(parser.try_into_motor_config().unwrap().backup.enabled);
     }
 }

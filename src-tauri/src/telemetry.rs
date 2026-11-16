@@ -2,7 +2,7 @@ use serde::Serialize;
 
 /// Stream selection is a host-side record of a successful write, not a firmware ack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TelemetryMode {
     #[default]
     None,
@@ -10,6 +10,9 @@ pub enum TelemetryMode {
     Idq,
     Speed,
     Position,
+    Angle,
+    ObserverPos,
+    ObserverSpeed,
 }
 
 impl TelemetryMode {
@@ -20,6 +23,9 @@ impl TelemetryMode {
             Self::Idq => "get_idq\r\n",
             Self::Speed => "get_speed\r\n",
             Self::Position => "get_position\r\n",
+            Self::Angle => "get_angle\r\n",
+            Self::ObserverPos => "get observer pos\r\n",
+            Self::ObserverSpeed => "get observer speed\r\n",
         }
     }
 
@@ -31,6 +37,9 @@ impl TelemetryMode {
             "get_idq" => Some(Self::Idq),
             "get_speed" => Some(Self::Speed),
             "get_position" => Some(Self::Position),
+            "get_angle" => Some(Self::Angle),
+            "get observer pos" => Some(Self::ObserverPos),
+            "get observer speed" => Some(Self::ObserverSpeed),
             _ => None,
         }
     }
@@ -55,9 +64,9 @@ pub struct TelemetrySample {
 
 /// Even malformed stream frames must never enter the command/ack channel.
 pub fn is_telemetry_line(line: &str) -> bool {
-    ["iabc:", "idq:", "speed:", "position:"]
+    ["iabc:", "idq:", "speed:", "position:", "angle:", "observer_pos:", "observer_speed:"]
         .iter()
-        .any(|prefix| line.starts_with(prefix))
+        .any(|prefix| line.trim_start().starts_with(prefix))
 }
 
 pub fn parse_frame(line: &str) -> Option<(TelemetryMode, TelemetryValues)> {
@@ -67,6 +76,9 @@ pub fn parse_frame(line: &str) -> Option<(TelemetryMode, TelemetryValues)> {
         "idq" => (TelemetryMode::Idq, 2),
         "speed" => (TelemetryMode::Speed, 2),
         "position" => (TelemetryMode::Position, 2),
+        "angle" => (TelemetryMode::Angle, 2),
+        "observer_pos" => (TelemetryMode::ObserverPos, 2),
+        "observer_speed" => (TelemetryMode::ObserverSpeed, 2),
         _ => return None,
     };
     let mut values = [0.0; 3];
@@ -94,7 +106,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_channel_order_and_signed_mechanical_values() {
+    fn preserves_channel_order_and_signed_protocol_units() {
         assert_eq!(
             parse_frame("iabc:1.250,-2.500,3.750"),
             Some((TelemetryMode::Iabc, TelemetryValues::Three([1.25, -2.5, 3.75])))
@@ -111,6 +123,18 @@ mod tests {
             parse_frame("position:1080.000,-720.250"),
             Some((TelemetryMode::Position, TelemetryValues::Two([1080.0, -720.25])))
         );
+        assert_eq!(
+            parse_frame("angle:359.999,-0.001"),
+            Some((TelemetryMode::Angle, TelemetryValues::Two([359.999, -0.001])))
+        );
+        assert_eq!(
+            parse_frame("observer_pos:-180.250,179.750"),
+            Some((TelemetryMode::ObserverPos, TelemetryValues::Two([-180.25, 179.75])))
+        );
+        assert_eq!(
+            parse_frame("observer_speed:8400.000,-8399.500"),
+            Some((TelemetryMode::ObserverSpeed, TelemetryValues::Two([8400.0, -8399.5])))
+        );
     }
 
     #[test]
@@ -119,6 +143,8 @@ mod tests {
             "iabc:1,2", "iabc:1,2,3,4", "idq:1,2,", "speed:,2",
             "position:1,NaN", "idq:inf,2", "idq:-inf,2", "speed:1e999,2",
             "iabc:1, 2,3", "position:1,2junk", "speed:1:2,3",
+            "angle:NaN,0", "angle:0,inf", "observer_pos:1", "observer_pos:1,2,3",
+            "observer_speed:1, 2", "observer_speed:1e999,0", " observer_pos:1,2",
         ] {
             assert!(parse_frame(line).is_none(), "{line}");
             assert!(is_telemetry_line(line), "{line}");
@@ -133,10 +159,12 @@ mod tests {
         for mode in [
             TelemetryMode::None, TelemetryMode::Iabc, TelemetryMode::Idq,
             TelemetryMode::Speed, TelemetryMode::Position,
+            TelemetryMode::Angle, TelemetryMode::ObserverPos, TelemetryMode::ObserverSpeed,
         ] {
             assert_eq!(TelemetryMode::from_command(mode.command().trim_end()), Some(mode));
         }
-        for command in ["get_speed 1", "get_speeds", "get_none now", "get_config"] {
+        for command in ["get_speed 1", "get_speeds", "get_none now", "get_config",
+            "get observer pos 1", "get observer speed now", "get_observer_pos", "get_angle 1"] {
             assert_eq!(TelemetryMode::from_command(command), None);
         }
     }
